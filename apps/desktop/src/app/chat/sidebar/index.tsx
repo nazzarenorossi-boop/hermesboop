@@ -5,6 +5,7 @@ import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
+import { useHermesConfigRecord } from '@/app/hooks/use-config-record'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -27,7 +28,7 @@ import { type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { sessionMatchesSearch } from '@/lib/session-search'
-import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
+import { configuredExcludeSources, normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
@@ -741,7 +742,21 @@ export function ChatSidebar({
     [isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
-  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, profileScope)
+  // Search honors the same source exclusions as the recents slice
+  // (`sessions.exclude_sources`, `a2a` by default): a hit inside an excluded
+  // source must not resurface a row the list itself hides.
+  const { data: searchConfigRecord } = useHermesConfigRecord()
+
+  const searchExcludeSources = useMemo(
+    () => configuredExcludeSources(searchConfigRecord),
+    [searchConfigRecord]
+  )
+
+  const { searchPending, serverMatches } = useServerSessionSearch(
+    trimmedQuery,
+    profileScope,
+    searchExcludeSources
+  )
 
   const searchResults = useMemo(
     () => mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending),

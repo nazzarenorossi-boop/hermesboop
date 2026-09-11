@@ -16,10 +16,17 @@ export interface ServerSessionSearch {
  * an unscoped request searches the primary backend's launch profile, whatever
  * profile is on screen. "All profiles" asks the primary as before.
  */
-export function useServerSessionSearch(query: string, profileScope: string): ServerSessionSearch {
+export function useServerSessionSearch(
+  query: string,
+  profileScope: string,
+  excludeSources: string[] = []
+): ServerSessionSearch {
   const [serverMatches, setServerMatches] = useState<SessionSearchResult[]>([])
   const [searchPending, setSearchPending] = useState(false)
   const profile = profileScope === ALL_PROFILES ? null : normalizeProfileKey(profileScope)
+  // Joined for the dependency list so a caller that rebuilds the array on every
+  // render does not re-fire the request.
+  const excludeKey = excludeSources.join(',')
 
   useEffect(() => {
     if (!query) {
@@ -34,7 +41,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
     setSearchPending(true)
 
     const id = window.setTimeout(() => {
-      void searchSessions(query, profile)
+      void searchSessions(query, profile, excludeSources)
         .then(res => {
           if (!cancelled) {
             setServerMatches(res.results)
@@ -52,7 +59,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
       cancelled = true
       window.clearTimeout(id)
     }
-  }, [query, profile])
+  }, [query, profile, excludeKey])
 
   return { searchPending, serverMatches }
 }
