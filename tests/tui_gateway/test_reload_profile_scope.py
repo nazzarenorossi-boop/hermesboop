@@ -186,7 +186,7 @@ def test_reload_names_the_servers_that_failed_to_connect(env, multiplex, monkeyp
     def _discover(*_a, **_k):
         with mcp_tool._lock:
             mcp_tool._server_connect_errors[(env.b_key, "broken")] = (
-                "token=secret-value refused"
+                "UPSTREAM-DETAIL refused"
             )
             mcp_tool._server_scope_keys[(env.b_key, "broken")] = env.b_key
             mcp_tool._server_connect_errors[(env.launch_key, "other")] = (
@@ -199,7 +199,7 @@ def test_reload_names_the_servers_that_failed_to_connect(env, multiplex, monkeyp
     result = _reload({"session_id": "B"})["result"]
 
     assert result["failed"] == ["broken"]
-    assert "secret-value" not in str(result)
+    assert "UPSTREAM-DETAIL" not in str(result)
 
 
 def test_compute_host_reload_forwards_rev_and_persists_always_for_the_callers_profile(
