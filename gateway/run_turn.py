@@ -23,6 +23,7 @@ from contextlib import nullcontext, suppress
 from contextvars import copy_context
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
+from gateway.run_turn_transcript import user_transcript_entry
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
 from gateway.response_filters import (
@@ -1803,33 +1804,6 @@ class GatewayTurnMixin:
             response = (response or "") + t("gateway.session.auto_reset_context_exhausted")
         return response, session_entry
 
-    @staticmethod
-    def _hmwa_user_transcript_entry(event, prepared, ts):
-        """Transcript row for the inbound user turn (clean text + event time when captured)."""
-        # Transient failure (429/timeout/5xx): persist the user message so the next message can load a
-        # transcript that reflects what was said. The caller pairs it with a stable assistant safety
-        # boundary rather than the provider error text. Hidden-reasoning-only incomplete turns follow the
-        # same persistence rule so peer-agent channels don't ingest provider details. (#7100, #51628)
-        _user_entry = {
-            "role": "user",
-            "content": (
-                prepared.persist_user_message if prepared.persist_user_message is not None
-                else prepared.message_text
-            ),
-            "timestamp": prepared.persist_user_timestamp if prepared.persist_user_timestamp is not None else ts,
-        }
-        if prepared.persist_user_display_kind:
-            _user_entry["display_kind"] = prepared.persist_user_display_kind
-        _display_metadata = {
-            **({"gateway_input_owner": prepared.persistence_owner} if prepared.persistence_owner else {}),
-            **delegated_continuation_metadata(event),
-        }
-        if _display_metadata:
-            _user_entry["display_metadata"] = _display_metadata
-        if getattr(event, "message_id", None):
-            _user_entry["message_id"] = str(event.message_id)
-        return _user_entry
-
     async def _hmwa_persist_turn_transcript(
         self, *, event, source, session_entry, session_key, agent_result, agent_messages,
         prepared, response, agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure,
@@ -1852,7 +1826,7 @@ class GatewayTurnMixin:
         # not None) keeps the persistence contract explicit and lets any future non-persisting runtime opt
         # into a gateway-side write by returning False.
         agent_persisted = agent_result.get("agent_persisted", self._session_db is not None)
-        _user_row = self._hmwa_user_transcript_entry(event, prepared, ts)
+        _user_row = user_transcript_entry(event, prepared, ts)
 
         if is_context_overflow_failure:
             pass  # Skip all transcript writes — don't grow a broken session
@@ -1996,7 +1970,7 @@ class GatewayTurnMixin:
                 )
                 if not _owned:
                     await self.async_session_store.append_to_transcript(
-                        session_entry.session_id, self._hmwa_user_transcript_entry(event, prepared, time.time()),
+                        session_entry.session_id, user_transcript_entry(event, prepared, time.time()),
                     )
                 # Tool effects are unknown after an exception.
                 await self._hmwa_close_failed_turn(session_entry.session_id, PARTIAL_FAILED_TURN_NOTICE)
