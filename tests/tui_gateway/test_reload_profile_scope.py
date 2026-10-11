@@ -317,3 +317,37 @@ def test_slash_exec_reload_skills_runs_in_the_live_session(env, monkeypatch):
 
     assert "fresh-skill" in output
     assert "fresh-skill" in srv._sessions["A"]["agent"]._gateway_turn_context_notes
+
+
+def test_reload_from_a_secondary_profile_discovers_with_that_profiles_secrets(env, multiplex, monkeypatch):
+    """tui_gateway/AGENTS.md § Profile scope probe: a ``.env`` name present only in the secondary resolves
+    for its reload's discovery (a server's ``${VAR}`` refs), the launch profile's value never does, and
+    ``os.environ`` is unchanged afterwards."""
+    import os
+    from agent.secret_scope import get_secret
+
+    (env.profile_b / ".env").write_text("RELOAD_PROBE_KEY=from-profile-b\n", encoding="utf-8")
+    (hermes_constants.get_hermes_home() / ".env").write_text("RELOAD_PROBE_KEY=from-launch\n", encoding="utf-8")
+    environ_before = dict(os.environ)
+    seen: list = []
+    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", lambda *a, **k: seen.append(get_secret("RELOAD_PROBE_KEY")))
+
+    _reload({"session_id": "B"})
+
+    assert seen == ["from-profile-b"]
+    assert dict(os.environ) == environ_before
+
+
+def test_a_session_of_another_profile_never_routes_the_reload_to_its_compute_host(env, multiplex, monkeypatch):
+    """Desktop's Connectors pane names its profile and may still send the active chat's id; when that
+    chat belongs to another profile the reload is for the pane's profile, not that chat's host."""
+    host_calls: list = []
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda session: session is srv._sessions["B"])
+    monkeypatch.setattr(srv, "_get_compute_host_supervisor",
+                        lambda: SimpleNamespace(reload_mcp=lambda *a, **k: host_calls.append(a) or {}))
+
+    resp = _reload({"session_id": "B", "profile": "default"})
+
+    assert resp["result"]["status"] == "reloaded"
+    assert host_calls == []
+    assert env.refreshed == ["agent-A"]

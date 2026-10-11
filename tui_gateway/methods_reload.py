@@ -143,7 +143,9 @@ def _reload_mcp(rid, params: dict) -> dict:
             "Reply `/reload-mcp now` to proceed, or `/reload-mcp always` to proceed and "
             "silence this prompt permanently.")
         return _ok(rid, {"status": "confirm_required", "message": message})
-    session = _sessions.get(params.get("session_id", ""))
+    # Only a session of the bound profile: a pane may name its profile while sending another
+    # profile's active chat, whose compute host reloads THAT profile.
+    session = dict(_reload_profile_sessions()).get(params.get("session_id", ""))
     if session and _session_uses_compute_host(session):
         return _reload_mcp_on_host(rid, params)
     from hermes_constants import hermes_home_key
