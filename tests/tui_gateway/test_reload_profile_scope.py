@@ -67,7 +67,7 @@ def env(monkeypatch, tmp_path):
             "B": _session("agent-B", profile_home=str(profile_b)),
         },
     )
-    for ledger in ("_servers", "_server_scope_keys", "_server_connect_errors"):
+    for ledger in ("_servers", "_server_scope_keys", "_server_tool_scopes", "_server_connect_errors"):
         monkeypatch.setattr(mcp_tool, ledger, dict(getattr(mcp_tool, ledger)))
     return SimpleNamespace(
         shutdowns=shutdowns,
@@ -374,3 +374,56 @@ def test_skills_reload_rescans_with_the_secondary_profiles_secrets(env, multiple
     assert "result" in resp, resp
     assert seen == [(env.b_key, "from-profile-b")]
     assert dict(os.environ) == environ_before
+
+
+def test_a_running_turn_blocks_only_the_pool_it_runs_on(env, monkeypatch):
+    """A turn-isolated chat's tools live on its compute host: its running turn must not block reloading
+    the profile's in-process pool, and an in-process reload must not wait on it. Its own host reload
+    is refused while it runs."""
+    srv._sessions["H"] = _session("agent-H", running=True)
+    monkeypatch.setattr(srv, "_session_uses_compute_host", lambda session: session is srv._sessions["H"])
+    monkeypatch.setattr(srv, "_get_compute_host_supervisor", lambda: SimpleNamespace(
+        reload_mcp=lambda *a, **k: pytest.fail("a running host session was reloaded mid-turn")))
+
+    assert _reload({"session_id": "A"})["result"]["status"] == "reloaded"
+    resp = _reload({"session_id": "H"})
+
+    assert resp["error"]["code"] == 4009 and "H" in resp["error"]["message"]
+
+
+def test_a_turn_in_a_profile_that_adopted_the_connection_blocks_the_reload(env, multiplex):
+    """Profile B adopted the launch profile's ``github`` connection; tearing it down mid-turn would fail
+    B's in-flight call the same way."""
+    key = (env.launch_key, "github")
+    with mcp_tool._lock:
+        mcp_tool._servers[key] = object()
+        mcp_tool._server_scope_keys[key] = env.launch_key
+        mcp_tool._server_tool_scopes[key] = {env.b_key}
+    srv._sessions["B"]["running"] = True
+
+    resp = _reload({"session_id": "A"})
+
+    assert resp["error"]["code"] == 4009 and "B" in resp["error"]["message"]
+    assert env.shutdowns == []
+
+
+def test_every_reload_reregisters_the_profiles_that_adopted_a_closed_connection(env, multiplex, monkeypatch):
+    """Discovery re-registers adopters only when this profile still configures a server; a reload after
+    removing the last one must not leave them without the tools they had adopted."""
+    reregistered: list = []
+    monkeypatch.setattr(_mcp_lifecycle, "_reregister_orphaned_adopters", lambda: reregistered.append(True))
+
+    _reload({"session_id": "A"})
+
+    assert reregistered == [True]
+
+
+def test_skills_reload_never_notes_a_chat_of_another_profile(env, monkeypatch):
+    srv._sessions["B"]["agent"]._gateway_turn_context_notes = ""
+    monkeypatch.setattr(srv, "_session_home_scope", lambda *_a, **_k: _null_scope())
+    monkeypatch.setattr("agent.skill_commands.reload_skills",
+                        lambda: {"added": [{"name": "fresh-skill"}], "removed": [], "total": 1})
+
+    srv._methods["skills.reload"](1, {"session_id": "B", "profile": "default"})
+
+    assert srv._sessions["B"]["agent"]._gateway_turn_context_notes == ""

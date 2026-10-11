@@ -56,13 +56,24 @@ def _queue_turn_note(agent, note: str) -> None:
     agent._gateway_turn_context_notes = f"{prior}\n\n{note}" if prior else note
 
 
-def _reload_profile_sessions() -> list:
-    """``(sid, session)`` of the bound profile (a session with no ``profile_home`` is the launch home's)."""
+def _sessions_of_homes(homes: set) -> list:
+    """``(sid, session)`` of the given profile home keys (a session with no ``profile_home`` is the launch home's)."""
     from hermes_constants import hermes_home_key
-    want = hermes_home_key()
     with _sessions_lock:
         return [(sid, sess) for sid, sess in _sessions.items()
-                if hermes_home_key(sess.get("profile_home") or get_process_hermes_home()) == want]
+                if hermes_home_key(sess.get("profile_home") or get_process_hermes_home()) in homes]
+
+
+def _adopter_homes() -> set:
+    """Profiles that adopted one of the bound profile's live connections (``mcp_tool_scope``): the
+    teardown closes those connections under them too."""
+    mcp_core = _tools_mod("tools.mcp_tool")
+    scope = mcp_core._mcp_registry_scope()
+    if scope is None:
+        return set()
+    with mcp_core._lock:
+        return {adopter for key, owner in mcp_core._server_scope_keys.items() if owner == scope
+                for adopter in mcp_core._server_tool_scopes.get(key, ()) if adopter != scope}
 
 
 def _shutdown_profile_mcp_servers() -> None:
@@ -128,10 +139,22 @@ def _reload_mcp_on_host(rid, params: dict) -> dict:
 
 
 def _reload_mcp(rid, params: dict) -> dict:
-    """Body of ``reload.mcp``, run inside the caller's profile scope. A turn running in that profile
-    refuses the reload: the teardown would fail its in-flight MCP calls and swap its tools between two
-    API calls of the same turn."""
-    busy = sorted(sid for sid, sess in _reload_profile_sessions() if sess.get("running"))
+    """Body of ``reload.mcp``, run inside the caller's profile scope. A turn running on the pool being
+    reloaded refuses it: the teardown would fail its in-flight MCP calls and swap its tools between two API
+    calls of the same turn. That pool is the compute host's own for a turn-isolated session, else the
+    profile's in-process pool, which also serves the profiles that adopted one of its connections."""
+    from hermes_constants import hermes_home_key
+    home = hermes_home_key()
+    own = _sessions_of_homes({home})
+    sid = params.get("session_id", "")
+    # Only a session of the bound profile: a pane may name its profile while sending another
+    # profile's active chat, whose compute host reloads THAT profile.
+    session = dict(own).get(sid)
+    on_host = bool(session) and _session_uses_compute_host(session)
+    sharing = [(sid, session)] if on_host else [
+        (other_sid, sess) for other_sid, sess in own + _sessions_of_homes(_adopter_homes())
+        if not _session_uses_compute_host(sess)]
+    busy = sorted(other_sid for other_sid, sess in sharing if sess.get("running"))
     if busy:
         return _err(rid, 4009, f"session busy — a turn is running in {', '.join(busy)}; "
                                "reload MCP servers when it finishes")
@@ -143,30 +166,23 @@ def _reload_mcp(rid, params: dict) -> dict:
             "Reply `/reload-mcp now` to proceed, or `/reload-mcp always` to proceed and "
             "silence this prompt permanently.")
         return _ok(rid, {"status": "confirm_required", "message": message})
-    # Only a session of the bound profile: a pane may name its profile while sending another
-    # profile's active chat, whose compute host reloads THAT profile.
-    session = dict(_reload_profile_sessions()).get(params.get("session_id", ""))
-    if session and _session_uses_compute_host(session):
+    if on_host:
         return _reload_mcp_on_host(rid, params)
-    from hermes_constants import hermes_home_key
-    home = hermes_home_key()
     # Revision the CALLER wants loaded; empty on legacy clients / manual /reload-mcp
     # (generation-only coalescing).
     req_rev = str(params.get("rev") or "")
 
     def _payload(coalesced: bool) -> dict:
+        """Read under _mcp_reload_lock: another profile's reload clears connect errors as it starts."""
         return {"status": "reloaded", "loaded_rev": _mcp_reload_loaded_rev.get(home, ""),
                 "failed": _failed_mcp_servers(), **({"coalesced": True} if coalesced else {})}
-
-    def _refresh_profile_sessions() -> None:
-        """Runs under _mcp_reload_lock so a concurrent reload can't tear the registry down mid-refresh."""
-        _refresh_live_sessions(get_hermes_home())
 
     def _do_full_reload() -> None:
         """shutdown+discover+refresh under the lock, then mark a completed generation. Config
         can change WHILE discover connects: re-hash and repeat until stable so the marked
-        generation matches what loaded. Discovery also re-registers profiles that had adopted a
-        connection this teardown closed (``_reregister_orphaned_adopters``)."""
+        generation matches what loaded. Profiles that had adopted a connection this teardown
+        closed re-adopt or connect their own, even when this profile no longer configures any
+        server (discovery then returns before re-registering them)."""
         mcp_agent, mcp_discovery = _tools_mod("tools.mcp_tool_agent"), _tools_mod("tools.mcp_tool_discovery")
         loaded = _compute_mcp_rev()
         for _ in range(_MCP_RELOAD_MAX_PASSES):
@@ -177,7 +193,8 @@ def _reload_mcp(rid, params: dict) -> dict:
             if after == loaded:
                 break
             loaded = after
-        _refresh_profile_sessions()
+        _tools_mod("tools.mcp_tool_lifecycle")._reregister_orphaned_adopters()
+        _refresh_live_sessions(get_hermes_home())
         _mcp_reload_loaded_rev[home] = loaded
         _mcp_reload_gen[home] = _mcp_reload_gen.get(home, 0) + 1
 
@@ -187,15 +204,20 @@ def _reload_mcp(rid, params: dict) -> dict:
     if _mcp_reload_lock.acquire(blocking=False):
         try:
             _do_full_reload()
+            payload = _payload(False)
         finally:
             _mcp_reload_lock.release()
-        return _finish_reload(rid, params, _payload(False))
+        return _finish_reload(rid, params, payload)
     gen_before = _mcp_reload_gen.get(home, 0)
     with _mcp_reload_lock:
         coalesced = (_mcp_reload_gen.get(home, 0) > gen_before
                      and (not req_rev or req_rev == _mcp_reload_loaded_rev.get(home, "")))
-        _refresh_profile_sessions() if coalesced else _do_full_reload()
-    return _finish_reload(rid, params, _payload(coalesced))
+        if coalesced:
+            _refresh_live_sessions(get_hermes_home())
+        else:
+            _do_full_reload()
+        payload = _payload(coalesced)
+    return _finish_reload(rid, params, payload)
 
 
 def _skills_reload_note(result: dict) -> str:
@@ -213,8 +235,15 @@ def _skills_reload_note(result: dict) -> str:
 
 
 def _queue_skills_reload_note(session, result: dict) -> None:
-    """The requesting session only, as the gateway and CLI do; the system prompt stays byte-stable."""
-    _queue_turn_note(session.get("agent") if isinstance(session, dict) else None, _skills_reload_note(result))
+    """The requesting session only, as the gateway and CLI do, and only when it belongs to the reloaded
+    profile (a call may name a profile and send another profile's chat); the system prompt stays
+    byte-stable."""
+    from hermes_constants import hermes_home_key
+    if not isinstance(session, dict):
+        return
+    if hermes_home_key(session.get("profile_home") or get_process_hermes_home()) != hermes_home_key():
+        return
+    _queue_turn_note(session.get("agent"), _skills_reload_note(result))
 
 
 _RELOAD_MCP_ONCE = frozenset({"now", "approve", "once", "yes"})
