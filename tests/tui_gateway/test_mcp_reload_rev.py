@@ -23,6 +23,7 @@ import threading
 
 import pytest
 
+import hermes_constants
 from tools import mcp_tool
 from tools import mcp_tool_discovery as _mcp_discovery
 from tools import mcp_tool_lifecycle as _mcp_lifecycle
@@ -62,7 +63,7 @@ def test_success_reports_loaded_rev(reload_env):
     assert envelope["result"]["status"] == "reloaded"
     assert envelope["result"]["loaded_rev"] == "rev-a"
     assert calls["discover"] == 1
-    assert list(srv._mcp_reload_gen.values()) == [1]
+    assert srv._mcp_reload_gen == {hermes_constants.hermes_home_key(): 1}
 
 
 def test_failed_reload_is_an_error_and_no_generation_advance(reload_env, monkeypatch):
@@ -99,7 +100,7 @@ def test_leader_rehashes_until_stable_when_config_changes_mid_reload(reload_env,
 
     assert envelope["result"]["loaded_rev"] == "rev-b"
     assert calls["discover"] == 2  # pass 1 read stale config, pass 2 converged
-    assert list(srv._mcp_reload_gen.values()) == [1]
+    assert srv._mcp_reload_gen == {hermes_constants.hermes_home_key(): 1}
 
 
 class _WaiterLock:

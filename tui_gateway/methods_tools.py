@@ -1420,6 +1420,7 @@ def _(rid, params: dict) -> dict:
     return _run_action(rid, params, _SKILLS_ACTIONS, "skills", params.get("query", ""))
 
 
+@_profile_scoped
 @_rpc("skills.reload", 5025)
 def _(rid, params: dict) -> dict:
     # Bound like ``commands.catalog``: an unbound rescan runs against the launch env, reports the session's

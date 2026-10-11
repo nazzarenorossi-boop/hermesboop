@@ -351,3 +351,26 @@ def test_a_session_of_another_profile_never_routes_the_reload_to_its_compute_hos
     assert resp["result"]["status"] == "reloaded"
     assert host_calls == []
     assert env.refreshed == ["agent-A"]
+
+
+def test_skills_reload_rescans_with_the_secondary_profiles_secrets(env, multiplex, monkeypatch):
+    """Not half-bound (tui_gateway/AGENTS.md § Profile scope): a rescan for a secondary-profile chat sees
+    that profile's secrets, not only its home."""
+    import os
+    from agent.secret_scope import get_secret
+
+    (env.profile_b / ".env").write_text("SKILLS_PROBE_KEY=from-profile-b\n", encoding="utf-8")
+    environ_before = dict(os.environ)
+    seen: list = []
+
+    def _rescan():
+        seen.append((hermes_constants.hermes_home_key(), get_secret("SKILLS_PROBE_KEY")))
+        return {"added": [], "removed": [], "total": 0}
+
+    monkeypatch.setattr("agent.skill_commands.reload_skills", _rescan)
+
+    resp = srv._methods["skills.reload"](1, {"session_id": "B"})
+
+    assert "result" in resp, resp
+    assert seen == [(env.b_key, "from-profile-b")]
+    assert dict(os.environ) == environ_before
