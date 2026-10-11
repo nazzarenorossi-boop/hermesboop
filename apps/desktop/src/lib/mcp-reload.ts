@@ -1,6 +1,5 @@
 import { capabilityScoped, type ProfileScope } from '@/api/client'
 import type { HermesGateway } from '@/hermes'
-import { sessionOfProfile } from '@/store/session'
 
 /** A turn-isolated session reloads on its compute host, whose own control
  *  budget is 120s; leave headroom above it so the desktop never times out a
@@ -68,15 +67,15 @@ export function parseMcpReloadResult(response: unknown): {
 
 /**
  * The one `reload.mcp` caller. The reload acts for `profile` when given, else
- * the profile of `sessionId`, else the launch profile. With `profile` set,
- * `sessionId` is kept only when it belongs to that profile — a foreign id
- * would send the reload to another profile's compute host.
+ * the profile of `sessionId`, else the launch profile. The backend uses
+ * `sessionId` only when that chat belongs to the reloaded profile.
  *
- * A backend predating the `profile` param rejects the whole call at admission
- * and then reloads EVERY profile in the process, so dropping `profile` and
- * retrying ONCE is always safe (the target profile reloads too). Matched on
- * the stable prefix, not `isOutOfSyncRpcParams`: the older backend predates
- * that suffix. Delete once no supported backend predates `profile`.
+ * A backend predating the `profile` param rejects the whole call at admission.
+ * Such a backend tears down every profile and rediscovers each one with a live
+ * chat, so retrying ONCE without `profile` is the most it can do for the
+ * target profile. Matched on the stable prefix, not `isOutOfSyncRpcParams`:
+ * the older backend predates that suffix. Delete once no supported backend
+ * predates `profile`.
  */
 export async function requestMcpReload(
   gateway: HermesGateway | null | undefined,
@@ -87,7 +86,7 @@ export async function requestMcpReload(
   }
 
   const profile = capabilityScoped(request.profile).profile
-  const sessionId = profile ? sessionOfProfile(request.sessionId, profile) : request.sessionId
+  const sessionId = request.sessionId
   const params: Record<string, unknown> = {}
 
   if (sessionId) {
@@ -133,5 +132,35 @@ async function requestWithProfileFallback(gateway: HermesGateway, params: Record
     const { profile: _dropped, ...withoutProfile } = params
 
     return gateway.request('reload.mcp', withoutProfile, MCP_RELOAD_TIMEOUT_MS)
+  }
+}
+
+/** A reload is refused (4009) while a turn runs on the pool it would restart. */
+export const MCP_RELOAD_BUSY_RETRIES = 40
+const MCP_RELOAD_BUSY_RETRY_MS = 3_000
+
+const isBusyRefusal = (error: unknown) =>
+  (error as { code?: unknown } | null)?.code === 4009 ||
+  /session busy/i.test(error instanceof Error ? error.message : String(error))
+
+/**
+ * For reloads nobody is watching (after a config save, a connect or a reconnect): wait out a running
+ * turn instead of dropping the reload, up to about two minutes, then report the refusal like any other
+ * failure. A reload the user asked for directly reports the refusal at once instead.
+ */
+export async function requestMcpReloadWhenIdle(
+  gateway: HermesGateway | null | undefined,
+  request: McpReloadRequest = {}
+): Promise<McpReloadResult> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await requestMcpReload(gateway, request)
+    } catch (error) {
+      if (!isBusyRefusal(error) || attempt >= MCP_RELOAD_BUSY_RETRIES) {
+        throw error
+      }
+
+      await new Promise(resolve => setTimeout(resolve, MCP_RELOAD_BUSY_RETRY_MS))
+    }
   }
 }

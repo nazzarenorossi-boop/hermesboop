@@ -12,7 +12,7 @@ import { useStoreSelector } from '@/lib/use-session-slice'
 import { $gateway } from '@/store/gateway'
 import { OFFICIAL_SKILLS_KEY } from '@/store/hub-actions'
 import { notifyError } from '@/store/notifications'
-import { $activeSessionId, sessionOfProfile } from '@/store/session'
+import { $activeSessionId } from '@/store/session'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -98,7 +98,7 @@ export function CapabilitiesView({
     // A scope pinned to another backend has no live socket here; the invalidations below still
     // refetch it, but the rescan RPC would land on the active gateway instead.
     if (gateway && !scope.crossBackend) {
-      const sessionId = sessionOfProfile($activeSessionId.get(), profileName)
+      const sessionId = $activeSessionId.get()
 
       try {
         await gateway.request('skills.reload', {

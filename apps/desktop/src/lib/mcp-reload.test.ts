@@ -1,21 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { HermesGateway, SessionInfo } from '@/hermes'
-import { $sessions } from '@/store/session'
+import type { HermesGateway } from '@/hermes'
 
-import { MCP_RELOAD_TIMEOUT_MS, mcpReloadSlashParams, requestMcpReload } from './mcp-reload'
-
-afterEach(() => {
-  $sessions.set([])
-})
+import {
+  MCP_RELOAD_BUSY_RETRIES,
+  MCP_RELOAD_TIMEOUT_MS,
+  mcpReloadSlashParams,
+  requestMcpReload,
+  requestMcpReloadWhenIdle
+} from './mcp-reload'
 
 function gatewayWith(response: unknown) {
   const request = vi.fn().mockResolvedValue(response)
 
   return { gateway: { request } as unknown as HermesGateway, request }
 }
-
-const sessionFor = (id: string, profile: string): SessionInfo => ({ id, profile }) as unknown as SessionInfo
 
 describe('requestMcpReload', () => {
   it('defaults an omitted failed list to empty for older backends', async () => {
@@ -82,30 +81,51 @@ describe('requestMcpReload', () => {
     )
   })
 
-  it('keeps a session that belongs to the target profile', async () => {
-    $sessions.set([sessionFor('s-own', 'work')])
+  it('forwards the session id; the backend uses it only for a chat of that profile', async () => {
     const { gateway, request } = gatewayWith({ status: 'reloaded' })
 
-    await requestMcpReload(gateway, { profile: 'work', sessionId: 's-own' })
+    await requestMcpReload(gateway, { profile: 'work', sessionId: 's-any' })
 
-    expect(request).toHaveBeenCalledWith('reload.mcp', { profile: 'work', session_id: 's-own' }, MCP_RELOAD_TIMEOUT_MS)
+    expect(request).toHaveBeenCalledWith('reload.mcp', { profile: 'work', session_id: 's-any' }, MCP_RELOAD_TIMEOUT_MS)
   })
 
-  it('drops a session that belongs to another profile', async () => {
-    $sessions.set([sessionFor('s-foreign', 'other')])
-    const { gateway, request } = gatewayWith({ status: 'reloaded' })
+  describe('requestMcpReloadWhenIdle', () => {
+    const busy = () => Object.assign(new Error('session busy — a turn is running in s-1'), { code: 4009 })
 
-    await requestMcpReload(gateway, { profile: 'work', sessionId: 's-foreign' })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
 
-    expect(request).toHaveBeenCalledWith('reload.mcp', { profile: 'work' }, MCP_RELOAD_TIMEOUT_MS)
-  })
+    it('retries while a turn is running, then reloads', async () => {
+      vi.useFakeTimers()
+      const request = vi.fn().mockRejectedValueOnce(busy()).mockResolvedValueOnce({ status: 'reloaded' })
+      const pending = requestMcpReloadWhenIdle({ request } as unknown as HermesGateway, { confirm: true })
 
-  it('drops a session the store does not know', async () => {
-    const { gateway, request } = gatewayWith({ status: 'reloaded' })
+      await vi.runAllTimersAsync()
 
-    await requestMcpReload(gateway, { profile: 'work', sessionId: 's-unknown' })
+      await expect(pending).resolves.toEqual(expect.objectContaining({ status: 'reloaded' }))
+      expect(request).toHaveBeenCalledTimes(2)
+    })
 
-    expect(request).toHaveBeenCalledWith('reload.mcp', { profile: 'work' }, MCP_RELOAD_TIMEOUT_MS)
+    it('gives up after a bounded number of tries and reports the refusal', async () => {
+      vi.useFakeTimers()
+      const request = vi.fn().mockRejectedValue(busy())
+      const pending = requestMcpReloadWhenIdle({ request } as unknown as HermesGateway, { confirm: true })
+      const settled = expect(pending).rejects.toThrow(/session busy/)
+
+      await vi.runAllTimersAsync()
+
+      await settled
+      expect(request.mock.calls.length).toBeGreaterThan(1)
+      expect(request.mock.calls.length).toBeLessThanOrEqual(MCP_RELOAD_BUSY_RETRIES)
+    })
+
+    it('does not retry any other failure', async () => {
+      const request = vi.fn().mockRejectedValue(new Error('server down'))
+
+      await expect(requestMcpReloadWhenIdle({ request } as unknown as HermesGateway)).rejects.toThrow('server down')
+      expect(request).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('retries once without profile when an older backend rejects it', async () => {

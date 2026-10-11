@@ -2,8 +2,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { HermesGateway, SessionInfo } from '@/hermes'
-import { $activeSessionId, $sessions } from '@/store/session'
+import type { HermesGateway } from '@/hermes'
+import { $activeSessionId } from '@/store/session'
 
 import { ManualMcpReload } from './manual-mcp-reload'
 
@@ -14,11 +14,8 @@ vi.mock('@/store/notifications', () => ({ notify, notifyError: vi.fn() }))
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  $sessions.set([])
   $activeSessionId.set(null)
 })
-
-const sessionFor = (profile: string): SessionInfo => ({ id: 'session-1', profile }) as unknown as SessionInfo
 
 function setup({
   activeSessionId = 'session-1',
@@ -61,7 +58,6 @@ describe('ManualMcpReload', () => {
   })
 
   it('reloads the pane profile once confirmed and reports success', async () => {
-    $sessions.set([sessionFor('default')])
     const request = setup()
 
     await openAndConfirm()
@@ -75,17 +71,6 @@ describe('ManualMcpReload', () => {
     )
     expect(request).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'success' })))
-  })
-
-  it('omits session_id when the active session belongs to another profile', async () => {
-    $sessions.set([sessionFor('other')])
-    const request = setup()
-
-    await openAndConfirm()
-
-    await waitFor(() =>
-      expect(request).toHaveBeenCalledWith('reload.mcp', { confirm: true, profile: 'default' }, expect.any(Number))
-    )
   })
 
   it('works with no active session', async () => {
