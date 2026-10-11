@@ -1,6 +1,8 @@
+import { capabilityScoped } from '@/api/client'
 import { listMcpServers } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
+import { requestMcpReload } from '@/lib/mcp-reload'
 import { prettyName } from '@/lib/text'
 import { type ComposerSuggestion, offerSuggestions } from '@/store/composer-suggestions'
 import { $gateway } from '@/store/gateway'
@@ -43,11 +45,13 @@ async function reconnect(server: string, sessionId: string | null, cancelled: ()
       cancelled
     })
 
-    // Fresh tokens reach the live session before the pill claims success.
-    await $gateway
-      .get()
-      ?.request('reload.mcp', { confirm: true, session_id: sessionId ?? undefined })
-      .catch(() => {})
+    // Fresh tokens reach the live session before the pill claims success. A
+    // failed reload does not undo the reconnect, so report it and carry on.
+    try {
+      await requestMcpReload($gateway.get(), { confirm: true, profile: capabilityScoped(), sessionId })
+    } catch (error) {
+      notifyError(error, translateNow('connectorsPage.reload.error'))
+    }
 
     clearMcpFailure(sessionId, server)
   } catch (error) {

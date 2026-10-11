@@ -10,6 +10,7 @@ import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
 import { notifyError } from '@/store/notifications'
 
 import { installBundledEntry } from '../mcp/install-catalog-entry'
+import { ManualMcpReload } from '../mcp/manual-mcp-reload'
 import { useMcpServers } from '../mcp/use-mcp-servers'
 
 import { AddServerDialog } from './add-dialog'
@@ -246,6 +247,8 @@ export function ConnectorsTab({ gateway, profile }: ConnectorsTabProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 px-4 pb-2">
+      <ManualMcpReload gateway={gateway} profile={profile} />
+
       <ConnectorsDirectory
         addYourOwn={
           <Button disabled={mcp.profilePending} onClick={() => setAddOpen(true)} size="xs" variant="outline">
