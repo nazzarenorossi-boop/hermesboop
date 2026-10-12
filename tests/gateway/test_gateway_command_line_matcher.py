@@ -165,3 +165,58 @@ def test_accepts_atomic_desktop_gateway():
     assert matches_runtime(ATOMIC_DESKTOP) is True
 
 
+
+
+# ──────────────────── spawn-intent suffix scan is O(N) (#137023) ────────────────
+#
+# ``gateway_spawn_intent_subcommand`` peels the ``-c`` wrapper and used to hand the canonical
+# matcher EVERY suffix (each a fresh ``shlex.split`` inside it) — O(N) suffixes at O(N) each on a
+# large inline source. The matcher only accepts a suffix that names ``gateway``, so the scan must
+# stop at the last such token instead of re-splitting the tail for every position.
+
+
+def test_spawn_intent_does_not_rescan_gateway_free_suffixes(monkeypatch):
+    """A large inline source with no ``gateway`` token must invoke the matcher a bounded number of
+    times, not once per token. Base behaviour: ~one call per suffix (hundreds)."""
+    from gateway import status as status_mod
+
+    calls = 0
+    real = status_mod._gateway_command_subcommand
+
+    def counting(command):
+        nonlocal calls
+        calls += 1
+        return real(command)
+
+    monkeypatch.setattr(status_mod, "_gateway_command_subcommand", counting)
+
+    body = "\n".join(f'x_{i}="${{{i}}}"' for i in range(400))
+    assert spawn_intent(" ".join(["bash", "-c", body])) is None
+    # The whole-string probe plus at most one per gateway-bearing suffix; a gateway-free source
+    # has none, so the bound is tiny (base: ~400).
+    assert calls <= 4, f"matcher called {calls} times for a gateway-free inline source"
+
+
+ADVERSARIAL_SPAWN_INTENT = [
+    # ``gateway`` only as a SUBSTRING of a junk token — the necessary-condition filter must keep
+    # looking, and the canonical matcher must still reject (no entrypoint).
+    "python -m mygateway thing",
+    "bash -c 'echo x' 1234 python -m mygateway run",
+    "some/path/mygateway.exe --help",
+    # a bare ``gateway`` word with no Hermes entrypoint
+    "python -c 'x' 1 echo gateway",
+    # Hermes entrypoint but NOT a lifecycle verb (read-only subcommands stay launchable)
+    "python -c 'x' 1 hermes dashboard",
+]
+
+
+@pytest.mark.parametrize("cmd", ADVERSARIAL_SPAWN_INTENT)
+def test_spawn_intent_rejects_substring_only_gateway(cmd):
+    assert spawn_intent(cmd) is None
+
+
+def test_spawn_intent_keeps_a_real_gateway_behind_a_substring_lookalike():
+    """The filter is a NECESSARY condition only: a genuine gateway that also happens to carry a
+    ``mygateway`` token must still be recognised."""
+    cmd = "python -m mygateway thing 1 python -m hermes_cli.main gateway run"
+    assert spawn_intent(cmd) == "run"
