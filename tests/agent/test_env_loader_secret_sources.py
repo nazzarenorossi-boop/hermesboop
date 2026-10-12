@@ -269,6 +269,53 @@ def test_cold_profile_hydration_seeds_op_env_bootstrap(tmp_path, monkeypatch):
     assert os.environ.get("OP_SERVICE_ACCOUNT_TOKEN") is None
 
 
+@pytest.mark.parametrize(
+    ("source_name", "token_key", "token_name"),
+    [
+        ("onepassword", "service_account_token_env", "OP_SERVICE_ACCOUNT_TOKEN"),
+        ("bitwarden", "access_token_env", "BWS_ACCESS_TOKEN"),
+    ],
+)
+def test_cold_profile_hydration_seeds_enabled_source_bootstrap_from_process_env(
+    tmp_path, monkeypatch, source_name, token_key, token_name
+):
+    """An enabled source receives its process-injected bootstrap token privately."""
+    token_value = f"process-{source_name}-token"
+    other_token = (
+        "BWS_ACCESS_TOKEN"
+        if token_name == "OP_SERVICE_ACCOUNT_TOKEN"
+        else "OP_SERVICE_ACCOUNT_TOKEN"
+    )
+    monkeypatch.setenv(token_name, token_value)
+    monkeypatch.setenv(other_token, "unrelated-process-token")
+    (tmp_path / "config.yaml").write_text(
+        "secrets:\n"
+        f"  {source_name}:\n"
+        "    enabled: true\n"
+        f"    {token_key}: {token_name}\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_scope import _is_global_env
+    from agent.secret_sources import registry as reg_module
+    from agent.secret_sources.registry import ApplyReport
+
+    seen_env = {}
+
+    def _capture_apply_all(_cfg, _home_path, environ=None):
+        seen_env.update(environ or {})
+        return ApplyReport(sources=[], provenance={})
+
+    monkeypatch.setattr(reg_module, "apply_all", _capture_apply_all)
+    reg_module._reset_registry_for_tests()
+
+    env_loader.hydrate_profile_secret_sources(tmp_path)
+
+    assert not _is_global_env(token_name)
+    assert seen_env[token_name] == token_value
+    assert other_token not in seen_env
+
+
 def test_cold_profile_hydration_dotenv_wins_over_op_env(tmp_path, monkeypatch):
     """.env takes precedence over .op.env for the same key (setdefault)."""
     monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
