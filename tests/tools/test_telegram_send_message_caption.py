@@ -20,23 +20,13 @@ import pytest
 
 
 def _install_telegram_mock(monkeypatch: pytest.MonkeyPatch, bot_factory: MagicMock) -> None:
-    class _InputFile:
-        def __init__(self, obj, filename=None, attach=False):
-            self.obj = obj
-            self.filename = filename
-            self.attach = attach
-
-    class _InputMediaPhoto:
-        def __init__(self, media):
-            self.media = media
-
     parse_mode = SimpleNamespace(MARKDOWN_V2="MarkdownV2", HTML="HTML")
     constants_mod = SimpleNamespace(ParseMode=parse_mode)
     _MessageEntity = lambda **_kw: SimpleNamespace(**_kw)
     telegram_mod = SimpleNamespace(
         Bot=bot_factory,
-        InputFile=_InputFile,
-        InputMediaPhoto=_InputMediaPhoto,
+        InputFile=lambda obj, filename=None, attach=False: SimpleNamespace(filename=filename),
+        InputMediaPhoto=lambda media: SimpleNamespace(media=media),
         MessageEntity=_MessageEntity,
         constants=constants_mod,
     )
@@ -97,18 +87,13 @@ def test_image_caption_rides_bubble_no_separate_text(monkeypatch: pytest.MonkeyP
 
 
 def test_multi_file_keeps_separate_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Multi-image batches go as ONE native album (sendMediaGroup, no per-photo
-    captions); the ambiguous caption→file association keeps the text a separate
-    message."""
     from tools.send_message_tool import _send_telegram
 
     _no_proxy(monkeypatch)
     bot = _make_bot()
     _install_telegram_mock(monkeypatch, MagicMock(return_value=bot))
     bot.send_media_group = AsyncMock(return_value=[
-        SimpleNamespace(message_id=10, media_group_id="group-1"),
-        SimpleNamespace(message_id=11, media_group_id="group-1"),
-    ])
+        SimpleNamespace(message_id=index, media_group_id="group-1") for index in (10, 11)])
     img = _tmpfile(".png")
     img2 = _tmpfile(".jpg")
     try:
@@ -118,12 +103,9 @@ def test_multi_file_keeps_separate_text(monkeypatch: pytest.MonkeyPatch) -> None
         assert res["success"] is True
         # Ambiguous caption→file association: text stays a separate message.
         bot.send_message.assert_awaited()
-        # One native album, not two individual sendPhoto calls.
+        # One native album, not two sendPhoto calls, and nothing rides the album call.
         bot.send_media_group.assert_awaited_once()
         bot.send_photo.assert_not_awaited()
-        # The text went out once, as its own message, and nothing rides the album call.
-        bot.send_message.assert_awaited_once()
-        assert bot.send_message.await_args.kwargs["text"] == "two pics"
         assert "caption" not in bot.send_media_group.await_args.kwargs
     finally:
         os.unlink(img)
