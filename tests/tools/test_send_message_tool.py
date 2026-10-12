@@ -495,6 +495,25 @@ class TestSendTelegramMediaDelivery:
         assert result["success"] is True and len(result["warnings"]) == 1
         assert bot.send_photo.await_count == singles
 
+    @pytest.mark.parametrize("extra, force_document", [(("notes.pdf",), False), ((), True)])
+    def test_mixed_and_force_document_batches_skip_the_album(self, tmp_path, monkeypatch, extra, force_document):
+        """An album carries photos only. A mixed batch must not lose its other file, and a
+        force-document send must not be recompressed: both stay on the per-file path."""
+        paths = [tmp_path / name for name in ("a.png", "b.jpg", *extra)]
+        for path in paths:
+            path.write_bytes(b"x")
+        bot = MagicMock()
+        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        bot.send_document = AsyncMock(return_value=SimpleNamespace(message_id=2))
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram(
+            "token", "12345", "", media_files=[(str(p), False) for p in paths], force_document=force_document))
+
+        assert result["success"] is True and not bot.send_media_group.called
+        assert bot.send_document.await_count == (2 if force_document else 1)
+        assert bot.send_photo.await_count + bot.send_document.await_count == len(paths)
+
     def test_sends_voice_for_ogg_with_voice_directive(self, tmp_path, monkeypatch):
         voice_path = tmp_path / "voice.ogg"
         voice_path.write_bytes(b"OggS" + b"\x00" * 32)
