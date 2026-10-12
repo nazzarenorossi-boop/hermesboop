@@ -106,6 +106,11 @@ def _is_telegram_thread_not_found(error: Exception) -> bool:
     return "thread not found" in str(error).lower()
 
 
+def _is_telegram_bad_request(error: Exception) -> bool:
+    """True for the Bot API's 400 answer: the request was refused as a whole, nothing was sent."""
+    return any(cls.__name__ == "BadRequest" for cls in type(error).__mro__)
+
+
 def _telegram_album_paths(media_files, force_document):
     """Paths to send as native albums: two or more existing photos and nothing else, else ``[]``.
     Mixed media and force-document batches stay on the per-file path."""
@@ -317,51 +322,45 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         # Chunk *after* formatting, in UTF-16 units: escaping can push a raw-<4096 message over.
         for chunk in BasePlatformAdapter.truncate_message(formatted, 4096, len_fn=utf16_len) if formatted.strip() else ():
             last_msg = await _telegram_send_text_chunk(bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs)
-        # Telegram renders two or more photos as a native album only when they
-        # are sent through sendMediaGroup. Bot API albums are capped at ten
-        # items, so larger batches are chunked without silently degrading to
-        # individual sendPhoto calls. Text never rides an album: with several
-        # files it went out above as its own message (_media_caption_split).
+        # Telegram renders two or more photos as a native album only when they are sent through
+        # sendMediaGroup, which takes 2-10 items: larger batches are chunked, and a lone remainder
+        # goes out below as one sendPhoto. Text never rides an album: with several files it went
+        # out above as its own message (_media_caption_split).
         _album_paths = await asyncio.to_thread(_telegram_album_paths, media_files, force_document)
         if _album_paths:
-            delivered = 0
-            try:
-                for start in range(0, len(_album_paths), 10):
-                    chunk = _album_paths[start:start + 10]
-                    album_kwargs = dict(thread_kwargs)
+            media_files, delivered = [], 0
+            for start in range(0, len(_album_paths), 10):
+                chunk = _album_paths[start:start + 10]
+                if len(chunk) < 2:
+                    media_files += [(path, False) for path in chunk]
+                    continue
+                album_kwargs = dict(thread_kwargs)
+                try:
                     try:
-                        last_msg = await _send_telegram_photo_album(
-                            bot, int_chat_id, chunk, album_kwargs,
-                        )
+                        last_msg = await _send_telegram_photo_album(bot, int_chat_id, chunk, album_kwargs)
                     except Exception as album_err:
-                        if (
-                            _is_telegram_thread_not_found(album_err)
-                            and album_kwargs.get("message_thread_id") is not None
-                        ):
-                            logger.warning(
-                                "Thread %s not found for Telegram album, retrying "
-                                "without message_thread_id",
-                                album_kwargs["message_thread_id"],
-                            )
-                            album_kwargs.pop("message_thread_id", None)
-                            last_msg = await _send_telegram_photo_album(
-                                bot, int_chat_id, chunk, album_kwargs,
-                            )
-                        else:
+                        if not (_is_telegram_thread_not_found(album_err)
+                                and album_kwargs.pop("message_thread_id", None) is not None):
                             raise
+                        logger.warning("Thread not found for Telegram album, retrying without message_thread_id")
+                        last_msg = await _send_telegram_photo_album(bot, int_chat_id, chunk, album_kwargs)
                     delivered += len(chunk)
-            except Exception as e:
-                # Every album failure becomes this error result; earlier chunks already landed, so
-                # say how many, letting a caller that retries avoid resending them.
-                sent = f" after {delivered} of {len(_album_paths)} photos were delivered" if delivered else ""
-                warning = _sanitize_error_text(f"Failed to send Telegram photo album{sent}: {e}")
-                logger.error(warning, exc_info=True)
-                warnings.append(warning)
-                return {"error": warning, "warnings": warnings}
-            # An intended album must never fall back to individual photos: that
-            # can duplicate a partially accepted group and violates the caller's
-            # batching contract. Receipt failures return an explicit error.
-            media_files = []
+                except Exception as e:
+                    if _is_telegram_bad_request(e):
+                        # Telegram refused the whole group and sent none of it (one bad photo is
+                        # enough): send these one by one so the acceptable ones still arrive.
+                        logger.warning("Telegram refused a photo album, sending its photos one by one: %s",
+                                       _sanitize_error_text(e))
+                        media_files += [(path, False) for path in chunk]
+                        continue
+                    # Timeout, network or receipt failure: the group may have landed, so it is not
+                    # resent and the remaining albums stop here. Say how much is known delivered.
+                    sent = f" after {delivered} of {len(_album_paths)} photos were delivered" if delivered else ""
+                    warnings.append(_sanitize_error_text(f"Failed to send Telegram photo album{sent}: {e}"))
+                    logger.error(warnings[-1], exc_info=True)
+                    if last_msg is None and not media_files:
+                        return {"error": warnings[-1], "warnings": warnings}
+                    break
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
                 warnings.append(f"Media file not found, skipping: {media_path}")

@@ -121,8 +121,10 @@ def test_multi_file_keeps_separate_text(monkeypatch: pytest.MonkeyPatch) -> None
         # One native album, not two individual sendPhoto calls.
         bot.send_media_group.assert_awaited_once()
         bot.send_photo.assert_not_awaited()
-        for item in bot.send_media_group.await_args.kwargs["media"]:
-            assert not item.media.filename.startswith("caption")
+        # The text went out once, as its own message, and nothing rides the album call.
+        bot.send_message.assert_awaited_once()
+        assert bot.send_message.await_args.kwargs["text"] == "two pics"
+        assert "caption" not in bot.send_media_group.await_args.kwargs
     finally:
         os.unlink(img)
         os.unlink(img2)

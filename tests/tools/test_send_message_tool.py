@@ -516,10 +516,69 @@ class TestSendTelegramMediaDelivery:
             "token", "12345", "", media_files=[(str(p), False) for p in paths]
         ))
 
-        # The first album landed: the error says so, and nothing falls back to sendPhoto.
-        assert "after 10 of 12 photos were delivered" in result["error"]
-        assert "wrong file" in result["error"]
+        # The first album landed, so the send succeeds with a warning that says how much; an
+        # ambiguous failure is never retried photo by photo (it could duplicate the group).
+        assert result["success"] is True and result["message_id"] == "9"
+        assert "after 10 of 12 photos were delivered" in result["warnings"][0]
+        assert "wrong file" in result["warnings"][0]
         bot.send_photo.assert_not_awaited()
+
+    def test_album_never_sends_a_one_item_group(self, tmp_path, monkeypatch):
+        """sendMediaGroup takes 2-10 items: the eleventh photo goes out as a single photo."""
+        paths = [tmp_path / f"photo-{index}.png" for index in range(11)]
+        for path in paths:
+            path.write_bytes(b"image")
+        bot = MagicMock()
+        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=99))
+        bot.send_media_group = AsyncMock(return_value=[
+            SimpleNamespace(message_id=index, media_group_id="group-a") for index in range(10)])
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram(
+            "token", "12345", "", media_files=[(str(p), False) for p in paths], thread_id="17"))
+
+        assert result["success"] is True and result["message_id"] == "99"
+        assert [len(call.kwargs["media"]) for call in bot.send_media_group.await_args_list] == [10]
+        bot.send_photo.assert_awaited_once()
+
+    def test_refused_album_falls_back_to_single_photos_and_keeps_the_thread_retry(self, tmp_path, monkeypatch):
+        """A 400 means Telegram sent none of the group, so its photos go one by one and the good
+        ones arrive; "thread not found" is retried once without the thread first."""
+        class BadRequest(Exception):
+            pass
+
+        paths = [tmp_path / f"photo-{index}.png" for index in range(2)]
+        for path in paths:
+            path.write_bytes(b"image")
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        bot.send_photo = AsyncMock(side_effect=[BadRequest("PHOTO_INVALID_DIMENSIONS"), SimpleNamespace(message_id=3)])
+        bot.send_media_group = AsyncMock(side_effect=[
+            BadRequest("Message thread not found"), BadRequest("PHOTO_INVALID_DIMENSIONS")])
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram(
+            "token", "12345", "weekly report", media_files=[(str(p), False) for p in paths], thread_id="17"))
+
+        first, retry = (call.kwargs for call in bot.send_media_group.await_args_list)
+        assert first["message_thread_id"] == 17 and "message_thread_id" not in retry
+        assert bot.send_photo.await_count == 2
+        assert result["success"] is True and result["message_id"] == "3"
+        assert len(result["warnings"]) == 1 and "photo-0.png" in result["warnings"][0]
+
+    @pytest.mark.parametrize("extra, force_document", [((), True), (("notes.pdf",), False)])
+    def test_album_is_only_for_all_photo_batches_not_sent_as_documents(self, tmp_path, extra, force_document):
+        """Mixed batches and force-document sends stay on the per-file path; a dropped guard would
+        send photos as an album and silently lose the other file."""
+        from tools.send_message_senders import _telegram_album_paths
+
+        files = []
+        for name in ("a.png", "b.jpg", *extra):
+            (tmp_path / name).write_bytes(b"x")
+            files.append((str(tmp_path / name), False))
+
+        assert _telegram_album_paths(files, force_document) == []
+        assert _telegram_album_paths(files[:2], False) == [files[0][0], files[1][0]]
 
     def test_sends_voice_for_ogg_with_voice_directive(self, tmp_path, monkeypatch):
         voice_path = tmp_path / "voice.ogg"
