@@ -169,25 +169,8 @@ class TestGatewayLifecycle:
     """Config load -> enabled service startup -> stop, over the real
     ``gateway.run_services`` owners (not a reimplementation)."""
 
-    @pytest.fixture
-    def lifecycle_registry(self):
-        events = []
-        entry = _entry(
-            name="lifecycle_svc",
-            service_factory=lambda cfg, gateway: _RecordingService(
-                events, "lifecycle_svc"
-            ),
-        )
-        service_registry.register(entry)
-        try:
-            yield events
-        finally:
-            service_registry.unregister("lifecycle_svc")
-
     @pytest.mark.asyncio
-    async def test_config_load_start_and_stop(
-        self, tmp_path, monkeypatch, lifecycle_registry
-    ):
+    async def test_config_load_start_and_stop(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         from gateway.config import load_gateway_config
@@ -210,21 +193,35 @@ class TestGatewayLifecycle:
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
-        config = load_gateway_config()
-        assert config.services["lifecycle_svc"]["enabled"] is True
-        assert config.services["lifecycle_svc"]["extra"] == {"poll_interval": 5}
+        # Register AFTER the home switch: a scope-less plugin registration
+        # lands in the CURRENT profile scope (fail-closed scoping), so it has
+        # to happen under the scope the gateway will resolve against.
+        events = []
+        entry = _entry(
+            name="lifecycle_svc",
+            service_factory=lambda cfg, gateway: _RecordingService(
+                events, "lifecycle_svc"
+            ),
+        )
+        service_registry.register(entry)
+        try:
+            config = load_gateway_config()
+            assert config.services["lifecycle_svc"]["enabled"] is True
+            assert config.services["lifecycle_svc"]["extra"] == {"poll_interval": 5}
 
-        # Minimal runner stand-in: the lifecycle owners only touch
-        # ``runner.config`` and ``runner.services``.
-        runner = SimpleNamespace(config=config, services={})
+            # Minimal runner stand-in: the lifecycle owners only touch
+            # ``runner.config`` and ``runner.services``.
+            runner = SimpleNamespace(config=config, services={})
 
-        await start_plugin_background_services(runner)
-        assert list(runner.services) == ["lifecycle_svc"]
-        assert lifecycle_registry == ["start:lifecycle_svc"]
+            await start_plugin_background_services(runner)
+            assert list(runner.services) == ["lifecycle_svc"]
+            assert events == ["start:lifecycle_svc"]
 
-        await stop_plugin_background_services(runner)
-        assert lifecycle_registry == ["start:lifecycle_svc", "stop:lifecycle_svc"]
-        assert runner.services == {}
+            await stop_plugin_background_services(runner)
+            assert events == ["start:lifecycle_svc", "stop:lifecycle_svc"]
+            assert runner.services == {}
+        finally:
+            service_registry.unregister("lifecycle_svc")
 
     @pytest.mark.asyncio
     async def test_unregistered_enabled_service_is_skipped(
@@ -384,6 +381,16 @@ class _LifecycleProbe:
                 # already have detached instead of waiting on us
                 await asyncio.sleep(0)
                 self.events.append(f"survived-cancel:{self.name}")
+        if self.start_result == "resist-cancel-hang":
+            # The adversarial shape: swallow the runtime's cancel AND keep
+            # running — this generation never settles within the detach
+            # grace. A SECOND cancel (test cleanup) is honored so the task
+            # cannot outlive the test's event loop.
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.events.append(f"swallowed-cancel:{self.name}")
+                await asyncio.sleep(3600)
         return True
 
     async def stop(self):
@@ -530,3 +537,168 @@ class TestLifecycleContract:
         # still stopped, and the dict cleared.
         assert "stop:good_stop" in events
         assert runner.services == {}
+
+
+class TestLifecycleRaceRepairs:
+    """October-review P1 repairs: the detached-start/cleanup race and
+    outer-cancellation shutdown settlement."""
+
+    def _register(self, events, name, **probe_kwargs):
+        entry = _entry(
+            name=name,
+            service_factory=lambda cfg, gw: _LifecycleProbe(events, name, **probe_kwargs),
+        )
+        service_registry.register(entry)
+        return entry
+
+    def _runner(self, *names):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            config=SimpleNamespace(services={n: {"enabled": True} for n in names}),
+            services={},
+        )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_fences_on_detached_start_settlement(self, monkeypatch):
+        """stop() must never run concurrently with a cancel-swallowing
+        start() that is still executing: cleanup waits for the detached
+        generation to settle first, so the stop event strictly follows the
+        survived-cancel event."""
+        import gateway.run_services as run_services
+
+        events = []
+        self._register(events, "fence_svc", start_result="resist-cancel")
+        monkeypatch.setattr(run_services, "_SERVICE_START_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(run_services, "_SERVICE_STOP_TIMEOUT_S", 0.5)
+        try:
+            runner = self._runner("fence_svc")
+            await run_services.start_plugin_background_services(runner)
+            assert runner.services == {}
+            # Cleanup ran — but only AFTER the detached generation settled.
+            assert f"survived-cancel:fence_svc" in events
+            assert f"stop:fence_svc" in events
+            assert events.index("survived-cancel:fence_svc") < events.index("stop:fence_svc")
+        finally:
+            service_registry.unregister("fence_svc")
+
+    @pytest.mark.asyncio
+    async def test_never_settling_generation_keeps_ownership_no_stop(self, monkeypatch, caplog):
+        """A generation that swallows the cancel AND keeps running past the
+        grace is not raced: stop() is skipped with a warning (the detached
+        task keeps ownership of its partial allocations)."""
+        import logging
+
+        import gateway.run_services as run_services
+
+        events = []
+        self._register(events, "never_svc", start_result="resist-cancel-hang")
+        monkeypatch.setattr(run_services, "_SERVICE_START_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(run_services, "_SERVICE_DETACH_GRACE_S", 0.05)
+        try:
+            runner = self._runner("never_svc")
+            with caplog.at_level(logging.WARNING, logger="gateway.run_services"):
+                await run_services.start_plugin_background_services(runner)
+            assert runner.services == {}
+            # No teardown raced the still-running setup.
+            assert "stop:never_svc" not in events
+            assert any("still running" in r.message for r in caplog.records)
+        finally:
+            service_registry.unregister("never_svc")
+            # Settle the deliberately-detached generation so it cannot
+            # outlive this test's event loop (second cancel is honored).
+            import asyncio
+
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_outer_cancel_mid_stop_still_settles_everything(self, monkeypatch):
+        """Cancelling the shutdown task while one stop() hangs must not skip
+        the remaining services or the ownership clear; the cancellation is
+        re-raised only after settlement."""
+        import asyncio
+        from types import SimpleNamespace
+
+        import gateway.run_services as run_services
+
+        events = []
+        bad = _LifecycleProbe(events, "hang", stop_hangs=True)
+        good = _LifecycleProbe(events, "good")
+        # Long per-service bound so the outer cancel (not the bound) is what
+        # interrupts the first stop.
+        monkeypatch.setattr(run_services, "_SERVICE_STOP_TIMEOUT_S", 30.0)
+        runner = SimpleNamespace(config=SimpleNamespace(services={}), services={
+            "hang": bad,
+            "good": good,
+        })
+
+        task = asyncio.ensure_future(run_services.stop_plugin_background_services(runner))
+        await asyncio.sleep(0.05)  # let it enter the hanging stop
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Settlement was unconditional: the second service stopped and the
+        # ownership dict cleared despite the cancellation.
+        assert "stop:good" in events
+        assert runner.services == {}
+
+
+class TestScopeFailClosed:
+    """October-review P2 repair: a scope-less direct registration never lands
+    process-global."""
+
+    def test_unresolvable_plugin_scope_falls_back_to_current_scope(self):
+        reg = BackgroundServiceRegistry()
+        reg.current_scope_key = lambda: "profile-A"  # shadow the staticmethod
+        entry_a = _entry(label="from A")
+        reg.register(entry_a)  # plain lambdas: inference yields None
+        # Landed in the CURRENT profile scope, not the global map.
+        assert reg.snapshot_registration("svc_test", scope="profile-A")[0] is entry_a
+        assert reg._entries == {}
+        # A second profile registering the same name cannot overwrite it.
+        reg.current_scope_key = lambda: "profile-B"
+        entry_b = _entry(label="from B")
+        reg.register(entry_b)
+        assert reg.snapshot_registration("svc_test", scope="profile-A")[0] is entry_a
+        assert reg.snapshot_registration("svc_test", scope="profile-B")[0] is entry_b
+        assert reg._entries == {}
+        # Each profile resolves its own entry.
+        reg.current_scope_key = lambda: "profile-A"
+        assert reg.get("svc_test") is entry_a
+
+    def test_builtin_source_stays_process_global(self):
+        reg = BackgroundServiceRegistry()
+        reg.current_scope_key = lambda: "profile-A"
+        entry = _entry(source="builtin")
+        reg.register(entry)
+        assert reg._entries.get("svc_test") is entry
+
+
+class TestRegistrationMissIsLogged:
+    """October-review P3 repair: an exact-replacement miss returns None WITH
+    a warning naming the service and scope."""
+
+    def test_displaced_registration_warns(self, monkeypatch, caplog):
+        import logging
+
+        from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
+
+        manifest = PluginManifest(name="miss-plugin", source="test", key="miss-plugin")
+        ctx = PluginContext(manifest, PluginManager())
+        # Force the miss path deterministically: registration is swallowed,
+        # so the post-register snapshot cannot be the new entry.
+        monkeypatch.setattr(service_registry, "register", lambda *a, **k: None)
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+            handle = ctx.register_background_service(
+                name="miss_svc",
+                label="Miss Service",
+                service_factory=lambda cfg, gw: "svc",
+                check_fn=lambda: True,
+            )
+        assert handle is None
+        hits = [r for r in caplog.records if "did not land exactly" in r.message]
+        assert hits, "expected a warning on the exact-replacement miss path"
+        assert "miss_svc" in hits[0].getMessage()

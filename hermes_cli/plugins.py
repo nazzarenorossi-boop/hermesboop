@@ -945,6 +945,18 @@ class PluginContext:
         service_registry.register(entry, scope=scope)
         current = service_registry.snapshot_registration(name, scope=scope)
         if current[0] is not entry or current[1] is not None:
+            # Not silent: a concurrent displacement, a scope-key mismatch and
+            # a ledger wiring bug would otherwise be indistinguishable to the
+            # plugin author staring at an unexplained ``None`` handle.
+            logger.warning(
+                "Plugin %s background service '%s' registration did not land "
+                "exactly (scope=%s, now_registered=%s, deferred_loader_pending=%s) "
+                "— returning no ownership handle",
+                self.manifest.name, name, scope,
+                getattr(current[0], "plugin_name", None) or (
+                    type(current[0]).__name__ if current[0] is not None else None),
+                current[1] is not None,
+            )
             return None
         self._manager._plugin_service_names.add(name)
         handle = self._manager._track_scoped_registration(

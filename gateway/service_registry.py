@@ -294,13 +294,25 @@ class BackgroundServiceRegistry:
 
     def register(self, entry: BackgroundServiceEntry, *, scope: Optional[str] = None) -> None:
         """Register a background service entry (last writer wins on name clash
-        WITHIN a scope; distinct profile scopes never overwrite each other)."""
+        WITHIN a scope; distinct profile scopes never overwrite each other).
+
+        A plugin-source registration with no explicit ``scope`` is scoped to
+        the caller's plugin profile when that can be inferred, and otherwise
+        falls back to the CURRENT profile scope — it never lands in the
+        process-global map, so a scope-less direct ``register()`` from one
+        profile can never overwrite another profile's same-name registration.
+        Only ``source="builtin"`` entries (or an explicit ``scope=None``
+        semantics via builtin) are process-global."""
         with self._lock:
             if scope is None and entry.source == "plugin":
                 scope = (
                     _caller_plugin_scope()
                     or _plugin_scope_from_callable(entry.service_factory)
                     or _plugin_scope_from_callable(entry.check_fn)
+                    # Unresolvable (plain functions, tests, direct users of
+                    # this public method): fail CLOSED into the current
+                    # profile scope rather than open into the global map.
+                    or self.current_scope_key()
                 )
             # A concrete registration supersedes any pending deferred loader.
             entries, deferred = self._scope_maps(scope, create=True)
