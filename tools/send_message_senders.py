@@ -351,8 +351,9 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         # enough): send these one by one so the acceptable ones still arrive.
                         logger.warning("Telegram refused a photo album, sending its photos one by one: %s",
                                        _sanitize_error_text(e))
-                        media_files += [(path, False) for path in chunk]
-                        continue
+                        # Finish the suffix in order before any later album could overtake it.
+                        media_files += [(path, False) for path in _album_paths[start:]]
+                        break
                     # Timeout, network or receipt failure: the group may have landed, so it is not
                     # resent and the remaining albums stop here. Say how much is known delivered.
                     sent = f" after {delivered} of {len(_album_paths)} photos were delivered" if delivered else ""

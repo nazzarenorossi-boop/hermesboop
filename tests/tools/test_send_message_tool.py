@@ -455,17 +455,25 @@ class TestSendTelegramMediaDelivery:
         bot.send_photo.assert_awaited_once()
         assert bot.send_photo.await_args.kwargs.get("caption") == "Hello there"
 
-    @pytest.mark.parametrize("count, groups, singles", [(2, [2], 0), (11, [10], 1)])
-    def test_standalone_photos_go_as_albums_of_two_to_ten(self, tmp_path, monkeypatch, count, groups, singles):
+    @pytest.mark.parametrize("count, groups, singles, refused", [(2, [2], 0, False), (11, [10], 1, False), (12, [10], 12, True)])
+    def test_standalone_photos_go_as_albums_of_two_to_ten(self, tmp_path, monkeypatch, count, groups, singles, refused):
         """One sendMediaGroup instead of a sendPhoto per image. It takes 2-10 items, so a lone
         remainder goes out as a single photo."""
         paths = [tmp_path / f"photo-{index}.png" for index in range(count)]
         for path in paths:
             path.write_bytes(b"image")
         bot = MagicMock()
-        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=99))
-        bot.send_media_group = AsyncMock(side_effect=lambda **kw: [
-            SimpleNamespace(message_id=index, media_group_id="group-a") for index in range(len(kw["media"]))])
+        order = []
+        async def photo(**kw):
+            order.append(os.path.basename(kw["photo"].name))
+            return SimpleNamespace(message_id=99)
+        async def album(**kw):
+            if refused and bot.send_media_group.await_count == 1:
+                raise type("BadRequest", (Exception,), {})("PHOTO_INVALID_DIMENSIONS")
+            order.extend(item.media.filename for item in kw["media"])
+            return [SimpleNamespace(message_id=index, media_group_id="group-a") for index in range(len(kw["media"]))]
+        bot.send_photo = AsyncMock(side_effect=photo)
+        bot.send_media_group = AsyncMock(side_effect=album)
         _install_telegram_mock(monkeypatch, bot)
 
         result = asyncio.run(_send_telegram("token", "12345", "", media_files=[(str(p), False) for p in paths]))
@@ -474,6 +482,7 @@ class TestSendTelegramMediaDelivery:
         sent = [call.kwargs["media"] for call in bot.send_media_group.await_args_list]
         assert [len(media) for media in sent] == groups and bot.send_photo.await_count == singles
         assert [item.media.filename for item in sent[0]] == [p.name for p in paths[:10]]
+        assert order == [p.name for p in paths]
 
     @pytest.mark.parametrize("error_name, singles", [("BadRequest", 2), ("TimedOut", 0)])
     def test_failed_album_after_delivered_text_is_a_warning(self, tmp_path, monkeypatch, error_name, singles):
