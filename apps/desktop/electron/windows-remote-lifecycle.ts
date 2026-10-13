@@ -39,8 +39,19 @@ function stripPowerShellNoise(stdout) {
 // Keep long probes out of the remote command line. Windows' default OpenSSH
 // command shell is commonly cmd.exe, whose command-line limit is 8191 chars.
 // SshConnection.exec already supports streaming stdin to the remote command.
+//
+// Short CRLF-terminated lines ended by one empty line: a single multi-KB line and a
+// channel EOF (ReadToEnd) are both intermittently lost on this Windows->Windows OpenSSH path.
+const STDIN_FRAME_LINE_CHARS = 512
+
+function powerShellStdinFrame(script) {
+  const lines = encodedPowerShell(script).match(new RegExp(`.{1,${STDIN_FRAME_LINE_CHARS}}`, 'g')) || ['']
+
+  return `${lines.join('\r\n')}\r\n\r\n`
+}
+
 function powerShellStdinCommand() {
-  return 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command [ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))).Invoke()'
+  return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command [ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($($b='';while($true){$l=[Console]::In.ReadLine();if(-not $l){break};$b+=$l};$b)))).Invoke()"
 }
 
 async function probeWindowsRemote(ssh, explicitHermesPath = '') {
@@ -62,7 +73,7 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
     '}',
     '}',
     `$explicit=${explicit}`,
-    'if($explicit){Assert-NoReparse $explicit $false;$explicitPython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($explicit), "python.exe");Assert-NoReparse $explicitPython $false}',
+    'if($explicit){Assert-NoReparse $explicit $false}',
     // HERMES_HOME is only trusted when it names a directory on the REMOTE: a stale User-scope
     // value (older install.ps1 persisted one) or a client path leaked over SSH otherwise fails
     // assertSafeRemoteHome as "Unsafe remote Hermes home" (#118988).
@@ -70,28 +81,24 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
     'if(-not $hermesHome -or -not (Test-Path -LiteralPath $hermesHome -PathType Container)){$hermesHome=Join-Path $env:LOCALAPPDATA "hermes"}',
     'Assert-NoReparse $hermesHome $true',
     '$candidate=[IO.Path]::Combine($hermesHome, "hermes-agent\\venv\\Scripts\\hermes.exe")',
-    '$candidatePython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($candidate), "python.exe")',
     'Assert-NoReparse $candidate $true',
-    'Assert-NoReparse $candidatePython $true',
     '$profileCandidate=[IO.Path]::Combine($HOME, "hermes-agent\\.venv\\Scripts\\hermes.exe")',
-    '$profileCandidatePython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($profileCandidate), "python.exe")',
     'Assert-NoReparse $profileCandidate $true',
-    'Assert-NoReparse $profileCandidatePython $true',
     '$fallbackHomeCandidate=Join-Path $hermesHome "hermes-agent\\venv\\Scripts\\hermes.exe"',
     '$fallbackProfileCandidate=Join-Path $HOME "hermes-agent\\.venv\\Scripts\\hermes.exe"',
     '$candidates=@()',
     'if($explicit){$candidates+=$explicit}',
     '$cmd=Get-Command hermes.exe -ErrorAction SilentlyContinue',
-    'if($cmd){Assert-NoReparse $cmd.Source $true;$cmdPython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($cmd.Source), "python.exe");Assert-NoReparse $cmdPython $true;$candidates+=$cmd.Source}',
+    'if($cmd){Assert-NoReparse $cmd.Source $true;$candidates+=$cmd.Source}',
     '$candidates+=$fallbackHomeCandidate',
     '$candidates+=$fallbackProfileCandidate',
-    '$hermes=$null',
-    'foreach($candidate in $candidates){Assert-NoReparse $candidate $true;$candidatePython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($candidate), "python.exe");Assert-NoReparse $candidatePython $true;try{$item=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop;if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer){$hermes=$item.FullName;break}}catch [Management.Automation.ItemNotFoundException]{continue}}',
+    // A published bin launcher need not ship a sibling python.exe, so a candidate is trusted only
+    // once it reports a runtime whose argv[0] is a real interpreter.
+    '$hermes=$null;$python=$null',
+    'foreach($candidate in $candidates){Assert-NoReparse $candidate $true;try{$item=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop}catch [Management.Automation.ItemNotFoundException]{continue}if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.PSIsContainer){continue}try{$runtimeLines=@(& $item.FullName --print-runtime-command)}catch{continue}if($LASTEXITCODE -ne 0 -or $runtimeLines.Count -eq 0){continue}try{$runtimeCommand=$runtimeLines[-1]|ConvertFrom-Json}catch{continue}$candidatePython=[string]$runtimeCommand[0];if(-not $candidatePython){continue}try{Assert-NoReparse $candidatePython $false;$runtimeItem=Get-Item -LiteralPath $candidatePython -Force -ErrorAction Stop}catch{continue}if($runtimeItem.PSIsContainer){continue}$hermes=$item.FullName;$python=$runtimeItem.FullName;break}',
     'if(-not $hermes){throw "Hermes is not installed on the remote Windows host."}',
     'Assert-NoReparse $hermes $false',
     'if($explicit -and $hermes -ne $explicit){throw "The configured Hermes path is not an executable file."}',
-    '$python=[IO.Path]::Combine([IO.Path]::GetDirectoryName($hermes), "python.exe")',
-    'Assert-NoReparse $python $false',
     '[ordered]@{os="Windows";arch=$env:PROCESSOR_ARCHITECTURE;hermesHome=$hermesHome;hermesPath=$hermes;python=$python}|ConvertTo-Json -Compress'
   ].join('\r\n')
 
@@ -101,7 +108,7 @@ async function probeWindowsRemote(ssh, explicitHermesPath = '') {
   // (module auto-load racing the exec read). stripPowerShellNoise drops every
   // block; the JSON is the last meaningful line.
   const lines = stripPowerShellNoise(
-    await ssh.exec(powerShellStdinCommand(), { stdinData: `${encodedPowerShell(script)}\r\n` })
+    await ssh.exec(powerShellStdinCommand(), { stdinData: powerShellStdinFrame(script) })
   )
 
   const parsed = JSON.parse(lines[lines.length - 1] || 'null')
@@ -190,7 +197,7 @@ public static class HermesMarkerNoFollow {
 // (powerShellStdinCommand): its script, with the C# no-follow reader, is far
 // over cmd.exe's 8191-char command-line limit.
 function windowsUpdateMarkerProbeStdinData(hermesHome, python = '') {
-  return `${encodedPowerShell(windowsUpdateMarkerProbeScript(hermesHome, python))}\r\n`
+  return powerShellStdinFrame(windowsUpdateMarkerProbeScript(hermesHome, python))
 }
 
 /**
@@ -285,7 +292,9 @@ async function detectRemotePlatform(ssh, explicitHermesPath = '') {
 }
 
 function helperCommand(runtime, operation, args = []) {
-  const argv = [runtime.python, '-m', 'hermes_cli.windows_ssh_runtime', operation, ...args]
+  // Reach the runtime module through the launcher's --run-module: a bare `python -m` assumes a
+  // sibling python.exe that a bin launcher does not have.
+  const argv = [runtime.hermesPath, '--run-module', 'hermes_cli.windows_ssh_runtime', operation, ...args]
 
   const script = [
     '$ProgressPreference="SilentlyContinue"',
@@ -311,13 +320,20 @@ async function helper(ssh, runtime, operation, args = [], stdinData?) {
   return parsed
 }
 
-function atomicWindowsSpawnCommand(runtime, reservation: any = {}) {
-  const argv = [runtime.python, '-m', 'hermes_cli.windows_ssh_runtime', 'spawn']
-  const helper = operation => [runtime.python, '-m', 'hermes_cli.windows_ssh_runtime', operation]
+// ~17k chars as -EncodedCommand (over cmd.exe's 8191-char limit), so the spawn script rides the
+// short-line stdin frame like the probes, its spawn payload embedded and piped to the helper.
+function atomicWindowsSpawnCommand(runtime, reservation: any = {}, spawnPayload = '') {
+  const argv = [runtime.hermesPath, '--run-module', 'hermes_cli.windows_ssh_runtime', 'spawn']
+  const helper = operation => [runtime.hermesPath, '--run-module', 'hermes_cli.windows_ssh_runtime', operation]
 
   const script = [
     '$ProgressPreference="SilentlyContinue"',
     '$ErrorActionPreference="Stop"',
+    // PowerShell 5 encodes a string piped to a native command with $OutputEncoding
+    // (ASCII by default), which drops a non-ASCII profile or path from the spawn
+    // and lock JSON; UTF-8 without BOM is what the helper's stdin reader expects.
+    '$OutputEncoding=[Text.UTF8Encoding]::new($false)',
+    `$spawnPayload=${psLiteral(spawnPayload)}`,
     WINDOWS_MARKER_JUDGE_PS,
     WINDOWS_CHECKOUT_LOCK_PS,
     `$hermesHome=${psLiteral(runtime.hermesHome)}`,
@@ -343,8 +359,8 @@ function atomicWindowsSpawnCommand(runtime, reservation: any = {}) {
         `& ${helper('remove-lock').map(psLiteral).join(' ')} ${psLiteral(reservation.ownershipId)}|Out-Null}`
       : '',
     reservation.ownershipId
-      ? `  $spawnLines=@(& ${argv.map(psLiteral).join(' ')}); $spawnExit=$LASTEXITCODE`
-      : `  & ${argv.map(psLiteral).join(' ')}`,
+      ? `  $spawnLines=@($spawnPayload | & ${argv.map(psLiteral).join(' ')}); $spawnExit=$LASTEXITCODE`
+      : `  $spawnPayload | & ${argv.map(psLiteral).join(' ')}`,
     reservation.ownershipId
       ? '  if($spawnExit -ne 0){exit $spawnExit}'
       : '  if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}',
@@ -358,11 +374,13 @@ function atomicWindowsSpawnCommand(runtime, reservation: any = {}) {
     .filter(line => line !== '')
     .join(';')
 
-  return powerShellCommand(script)
+  return script
 }
 
-async function atomicWindowsSpawn(ssh, runtime, stdinData, reservation: any = {}) {
-  const output = await ssh.exec(atomicWindowsSpawnCommand(runtime, reservation), { stdinData })
+async function atomicWindowsSpawn(ssh, runtime, spawnPayload, reservation: any = {}) {
+  const output = await ssh.exec(powerShellStdinCommand(), {
+    stdinData: powerShellStdinFrame(atomicWindowsSpawnCommand(runtime, reservation, spawnPayload))
+  })
 
   const lines = stripPowerShellNoise(output)
 
