@@ -1,0 +1,31 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: pay
+description: Discover priced APIs and pay per request with a hosted Pay wallet.
+source: https://github.com/solana-foundation/pay
+
+# `pay-cli` remains available for users who want a wallet on this machine.
+transport:
+  type: http
+  url: https://connect.pay.sh/mcp
+
+auth:
+  type: oauth
+
+post_install: |
+  Connect your Pay account in a browser:
+    hermes mcp login pay
+
+  Start a new Hermes session so its Pay tools load. You can browse the catalog
+  before funding a wallet; Pay offers a setup link when a call needs one.
+  No Pay CLI, API key, or local wallet is required.
+
+  Use a personal Hermes profile: chats sharing a profile share its Pay account.
+  Hosted Pay enforces its spending policy; Hermes displays payment confirmations
+  through MCP elicitation. Hosted approval does not use local Touch ID.
+
+  If you already installed the old local `pay` MCP, reinstalling `pay` replaces
+  its connection with the hosted one. Use `hermes mcp install pay-cli` to keep
+  the local CLI connection separately.
