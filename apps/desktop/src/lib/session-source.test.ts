@@ -4,7 +4,6 @@ import {
   configuredExcludeSources,
   isMessagingSource,
   mergeExcludedSources,
-  MESSAGING_SESSION_SOURCE_IDS,
   sessionSourceSearchTerms
 } from './session-source'
 
