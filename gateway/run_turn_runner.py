@@ -73,6 +73,15 @@ class TurnRunner:
         holder = self._ctx.stream_consumer_holder
         return holder[0] if holder else None
 
+    async def _mark_output_started(self) -> None:
+        """Before the first visible stream effect, settle the durable inbound spool as
+        ``indeterminate`` (no output owner exists yet; see ``mark_durable_inbound_output_started``)."""
+        event = self._ctx.inbound_event
+        if event is None:
+            return
+        from gateway.shutdown_flush import mark_durable_inbound_output_started
+        await asyncio.to_thread(mark_durable_inbound_output_started, event)
+
     def _drain_progress_queue(self) -> None:
         q = self._ctx.progress_queue
         with suppress(Exception):
@@ -868,6 +877,7 @@ class TurnRunner:
                         ),
                         on_before_finalize=pause_typing_before_finalize,
                         initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
+                        on_before_first_effect=self._mark_output_started,
                     )
                     ctx.stream_consumer_holder[0] = stream_consumer
             except Exception as err:
