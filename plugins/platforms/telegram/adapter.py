@@ -380,14 +380,62 @@ def _escape_mdv2(text: str) -> str:
 
 
 def _strip_mdv2(text: str) -> str:
-    """Strip MarkdownV2 escapes and formatting markers for the plain-text fallback."""
-    cleaned = re.sub(r'\\([_*\[\]()~`>#\+\-=|{}.!\\])', r'\1', text)  # escape backslashes
-    cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned)  # **bold** BEFORE MarkdownV2 *bold*
-    cleaned = re.sub(r'\*([^*]+)\*', r'\1', cleaned)
-    cleaned = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', cleaned)  # italic; word-bounded so snake_case survives
-    cleaned = re.sub(r'~([^~]+)~', r'\1', cleaned)  # strikethrough
-    cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)  # spoiler
-    return cleaned
+    """Plain-text fallback for a failed MarkdownV2 parse.
+
+    This output is sent with ``parse_mode=None`` — Telegram renders it as PLAIN TEXT,
+    so it must contain NO MarkdownV2 markers at all: code fences (`````) are deleted
+    (they would show as literal backticks), inline-code backticks become plain quotes,
+    and every reserved char is left bare (no escape backslashes — plain mode shows them
+    literally). Content is preserved; only markup is removed.
+
+    The old behavior preserved ``fenced/inline code blocks verbatim`` and escaped reserved
+    chars, which was correct for *re-parsing* but wrong here: plain mode showed literal
+    ``` fences and ``\``-escapes (the `` ``` (×4) `` artifact in progress bubbles).
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        # Fenced block: delete the ``` delimiters, keep the body. (A fence in plain text
+        # renders as literal backticks and mis-frames everything after it.)
+        if text.startswith("```", i) and (i == 0 or text[i - 1] == "\n"):
+            end = text.find("```", i + 3)
+            if end != -1:
+                close = text.find("\n", end + 3)
+                close = close if close != -1 else n
+                body = text[i + 3 : end]  # strip the opening fence
+                # strip the trailing closing fence + newline
+                out.append(body.rstrip())
+                out.append("\n")
+                i = close
+                continue
+        # Inline code: strip the backticks (plain mode shows them literally); keep content.
+        if text[i] == "`" and (i == 0 or text[i - 1] != "\\"):
+            j = text.find("`", i + 1)
+            if j != -1 and "\n" not in text[i : j + 1]:
+                out.append(text[i + 1 : j])
+                i = j + 1
+                continue
+        ch = text[i]
+        if ch in "_*[]()~`>#+-=|{}.":
+            # plain text: leave the char bare; do NOT prepend a backslash (plain mode shows it)
+            out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    # A lone, unpaired backtick must not survive into plain text (Telegram would treat
+    # it as an unclosed code entity even with parse_mode=None? No — plain mode shows it
+    # literally, but it looks broken. Drop stray backticks that never closed a span.
+    result = "".join(out)
+    # count backticks per line; a line with an ODD backtick count has an unclosed span
+    fixed = []
+    for line in result.splitlines(keepends=True):
+        n = line.count("`")
+        if n % 2 == 1:
+            # remove the LAST backtick on the line to rebalance
+            idx = line.rfind("`")
+            line = line[:idx] + line[idx + 1 :]
+        fixed.append(line)
+    return "".join(fixed)
 
 
 _CHUNK_INDICATOR_ON_FENCE_RE = re.compile(r'(?m)^``` (?P<indicator>(?:\\)?\(\d+/\d+(?:\\)?\))$')

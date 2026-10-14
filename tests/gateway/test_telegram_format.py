@@ -403,16 +403,50 @@ class TestFormatMessageComplex:
 
 
 class TestStripMdv2:
-    def test_removes_escape_backslashes(self):
-        assert _strip_mdv2(r"hello\.world\!") == "hello.world!"
+    """The MarkdownV2 parse-failure fallback (plain-text mode).
 
+    NEW contract: the output is sent with `parse_mode=None`, so Telegram renders it as
+    PLAIN TEXT — it must contain NO MarkdownV2 markers at all. Code fences (```) are
+    deleted (they would show as literal backticks), inline-code backticks become plain
+    quotes, and reserved chars are left BARE (no escape backslash — plain mode shows
+    backslashes literally). Content is preserved; only markup is removed. Regression
+    for the visible "``` (×4)" artifact in tool-progress bubbles after a parse failure.
+    """
 
-    def test_removes_both_bold_and_italic(self):
-        result = _strip_mdv2("*bold* and _italic_")
-        assert result == "bold and italic"
+    def test_plain_text_has_no_markdown_markers(self):
+        out = _strip_mdv2("This is a test: (parentheses) and = equals.")
+        assert out == "This is a test: (parentheses) and = equals."
+        assert "\\" not in out  # no escape backslashes in plain mode
 
-    def test_preserves_snake_case(self):
+    def test_lone_backtick_is_dropped(self):
+        # A lone ` is not a code entity; plain mode must not show it raw.
+        out = _strip_mdv2("backtick ` and nothing else.")
+        assert "`" not in out
+        assert out == "backtick  and nothing else."
+
+    def test_unclosed_italic_marker_bare(self):
+        # Plain mode shows * literally; no backslash-escape.
+        out = _strip_mdv2("*unclosed italic and more")
+        assert out == "*unclosed italic and more"
+
+    def test_fenced_code_block_fences_removed_content_kept(self):
+        out = _strip_mdv2("Header:\n```\ncode `tick` *star*\n```\nend.")
+        # fences deleted, body kept, inline backticks inside body flattened
+        assert "```" not in out
+        assert "code " in out and "tick" in out and "star" in out
+        assert out.startswith("Header:\n") and out.rstrip().endswith("end.")
+
+    def test_inline_code_backticks_removed(self):
+        out = _strip_mdv2("use `code` and nothing else")
+        assert out == "use code and nothing else"
+
+    def test_snake_case_stays_bare(self):
+        # Plain mode: underscore is literal, not an italic marker.
         assert _strip_mdv2("my_variable_name") == "my_variable_name"
+
+    def test_already_escaped_input_backslashes_kept(self):
+        # Content that arrived pre-escaped is preserved verbatim (plain mode shows it).
+        assert _strip_mdv2(r"hello\.world\!") == r"hello\.world\!"
 
 
 

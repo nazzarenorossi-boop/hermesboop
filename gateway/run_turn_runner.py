@@ -49,6 +49,28 @@ _CARD_DESTINATION_REFUSALS = {
 }
 
 
+_PROGRESS_FENCE_LINE = re.compile(r"^[ \t]*`{3,}[ \t]*$")
+
+
+def _progress_repeat_marker(msg: str, count: int) -> str:
+    """Append the ``(×N)`` repeat marker without breaking a fenced progress block.
+
+    The marker used to be appended to the LAST line. For a fenced terminal progress
+    block that line IS the closing fence, so ``\\`\\`\\` (×2)`` no longer matches the
+    send-time closer (``(^[ \\t]*```)[ \\t]*\\r?$``): the MarkdownV2 formatter then
+    never sees the block close, escapes the fence characters, and the bubble shows
+    literal backticks. Put the marker on the header line (or its own line when the
+    block has no header) so the fence stays a bare closing fence.
+    """
+    lines = msg.split("\n")
+    last = next((ln for ln in reversed(lines) if ln.strip()), "")
+    if _PROGRESS_FENCE_LINE.match(last):
+        if lines and not _PROGRESS_FENCE_LINE.match(lines[0]):
+            return "\n".join([lines[0] + f" (×{count})", *lines[1:]])
+        return msg + f"\n(×{count})"
+    return msg + f" (×{count})"
+
+
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
     say so through ``supports_exec_approval_buttons``; anything else (test doubles, relay-style
@@ -283,7 +305,32 @@ class TurnRunner:
                 # for full detail and platform message-length limits handle the rest.
                 if pl > 0 and len(args_str) > pl:
                     args_str = args_str[:pl - 3] + "..."
-                code = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool_name, keys=list(args.keys()), args=args_str)
+                if getattr(adapter, "supports_code_blocks", False):
+                    # Markdown-capable surfaces (Telegram MarkdownV2, Discord, Slack): fence the
+                    # raw args so the platform formatter stashes them verbatim instead of
+                    # mangling code as markdown (_underscores_, *stars*, bare braces). Bare
+                    # fence — no language tag (Slack mrkdwn prints one literally), matching
+                    # _progress_terminal_blocks. Fence length must EXCEED any backtick run in
+                    # the args (CommonMark), but Telegram MarkdownV2 only parses exactly-3-
+                    # backtick fences — a longer opener is literal text, so a nested ``` in
+                    # the args would then open a real pre block mid-JSON ("Can't find end of
+                    # Code entity"). Escape backticks inside the args instead, keeping the
+                    # fence fixed at 3 (MarkdownV2 requires \` escaped inside pre; the
+                    # Telegram formatter's _protect_fenced does this at send time).
+                    # JSON's single-line dump renders every newline as the literal two-char
+                    # sequence ``\n``, which MarkdownV2 <pre> shows as backslash-n glyphs
+                    # rather than line breaks (the shredded-looking bubble). Turn the JSON
+                    # escapes back into REAL newlines/tabs so the fenced payload reads as
+                    # code. ``(?<!\\)`` keeps a genuine literal backslash-n in the content
+                    # (json.dumps doubles it to ``\\n``) from being rewritten.
+                    code = t("gateway.progress.tool_verbose_fenced", emoji=emoji, tool=tool_name,
+                             keys=list(args.keys()),
+                             args=re.sub(r"(?<!\\)\\t", "\t",
+                                re.sub(r"(?<!\\)\\n", "\n",
+                                       args_str.replace("`", "\\`"))))
+                else:
+                    code = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool_name,
+                             keys=list(args.keys()), args=args_str)
             elif code is None:
                 code = (t("gateway.progress.tool_preview", emoji=emoji, tool=tool_name, preview=preview) if preview
                         else t("gateway.progress.tool_pending", emoji=emoji, tool=tool_name))
@@ -312,7 +359,7 @@ class TurnRunner:
         if msg == ctx.last_progress_msg[0]:
             ctx.repeat_count[0] += 1
             if native:
-                sc.on_tool_progress(f"{msg} (×{ctx.repeat_count[0] + 1})")
+                sc.on_tool_progress(_progress_repeat_marker(msg, ctx.repeat_count[0] + 1))
             else:
                 ctx.progress_queue.put(("__dedup__", msg, ctx.repeat_count[0]))
             return
@@ -649,7 +696,7 @@ class TurnRunner:
             _, base_msg, count = raw
             if not st.progress_lines:
                 return base_msg
-            st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
+            st.progress_lines[-1] = _progress_repeat_marker(base_msg, count + 1)
             return st.progress_lines[-1]
         st.progress_lines.append(raw)
         return raw
