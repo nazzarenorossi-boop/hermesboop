@@ -2949,6 +2949,10 @@ export interface Translations extends NoticeTranslations {
       working: string
       done: string
     }
+    resize: {
+      pinnedBoundary: string
+      sessionsBottom: string
+    }
     markAllRead: string
   }
 

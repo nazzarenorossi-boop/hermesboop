@@ -3365,6 +3365,10 @@ export const en: Translations = {
       working: 'Working',
       done: 'Done'
     },
+    resize: {
+      pinnedBoundary: 'Resize Pinned and Sessions',
+      sessionsBottom: 'Resize Sessions'
+    },
     markAllRead: 'Mark all as read'
   },
 
