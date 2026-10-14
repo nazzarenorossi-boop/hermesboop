@@ -84,8 +84,14 @@ class TestInitialize:
         assert isinstance(resp, InitializeResponse)
         assert resp.protocol_version == acp.PROTOCOL_VERSION
 
-
-
+    @pytest.mark.asyncio
+    async def test_initialize_advertises_http_and_sse_mcp(self, agent):
+        """ACP clients only send HTTP/SSE MCP servers in session/new|load when the wire payload
+        advertises them; an omitted mcpCapabilities means both default to false."""
+        resp = await agent.initialize(protocol_version=1)
+        payload = resp.agent_capabilities.model_dump(by_alias=True, exclude_none=True)
+        assert payload["mcpCapabilities"]["http"] is True
+        assert payload["mcpCapabilities"]["sse"] is True
 
     @pytest.mark.asyncio
     async def test_initialize_advertises_provider_and_terminal_auth_methods(self, agent, monkeypatch):
