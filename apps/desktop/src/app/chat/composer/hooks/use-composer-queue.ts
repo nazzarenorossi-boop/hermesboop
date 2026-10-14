@@ -13,10 +13,11 @@ import {
   clearQueuedPromptDrainFailures,
   enqueueQueuedPrompt,
   getQueuedPrompts,
+  getQueueParkRevision,
   isSteerableEntry,
   MAX_AUTO_DRAIN_ATTEMPTS,
   migrateQueuedPrompts,
-  promoteQueuedPrompt,
+  parkQueuedPrompts,
   type QueuedPromptEntry,
   removeQueuedPrompt,
   resolveQueuedPromptTransport,
@@ -140,6 +141,15 @@ export function useComposerQueue({
   const prevQueueKeyRef = useRef(activeQueueSessionKey)
   const drainingQueueRef = useRef(false)
   const drainFailuresRef = useRef(new Map<string, number>())
+  // A per-row Send now is a one-shot request, not a "resume the whole queue" gesture.
+  // Capture the session key so a late settle cannot dispatch into another session.
+  const pendingManualSendRef = useRef<{
+    sessionKey: string
+    entryId: string
+    parkRevision: number
+    cancelAcknowledged: boolean
+  } | null>(null)
+  const [manualSendRetryTick, setManualSendRetryTick] = useState(0)
   const [drainRetryTick, setDrainRetryTick] = useState(0)
 
   const beginQueuedEdit = (entry: QueuedPromptEntry) => {
@@ -311,7 +321,10 @@ export function useComposerQueue({
   // queue as it stands inside the cross-window claim. Resolves null when there
   // is nothing to send: another window already sent the picked entry.
   const runDrain = useCallback(
-    async (pickEntry: (entries: QueuedPromptEntry[]) => QueuedPromptEntry | undefined): Promise<boolean | null> => {
+    async (
+      pickEntry: (entries: QueuedPromptEntry[]) => QueuedPromptEntry | undefined,
+      resumeQueue = true
+    ): Promise<boolean | null> => {
       if (drainingQueueRef.current || !activeQueueSessionKey) {
         return false
       }
@@ -320,6 +333,7 @@ export function useComposerQueue({
       const drainRuntimeSessionId = sessionId ?? null
 
       drainingQueueRef.current = true
+      const parkRevisionAtStart = getQueueParkRevision(drainQueueSessionKey)
 
       try {
         return await withQueueDrainClaim(drainQueueSessionKey, async queue => {
@@ -361,16 +375,21 @@ export function useComposerQueue({
           // Submit now owns the blob: previews (optimistic bubble); do not revoke.
           removeQueuedPrompt(drainQueueSessionKey, entry.id, { retainPreviewUrls: true })
           resetBrowseState(drainRuntimeSessionId)
-          // A successful drain means the queue is flowing again — lift any park
-          // so the remaining entries follow. Manual drains (Enter on an empty
-          // composer, the per-row send arrow) are exactly the resume gestures a
-          // parked queue waits for; the auto path only reaches here unparked.
-          unparkQueuedPrompts(drainQueueSessionKey)
+          // Resuming a queue is different from sending an individual entry.
+          // One-shot sends leave the rest parked until the user resumes explicitly.
+          // A subsequent Stop / Send now must not be undone by this async submit.
+          if (resumeQueue && getQueueParkRevision(drainQueueSessionKey) === parkRevisionAtStart) {
+            unparkQueuedPrompts(drainQueueSessionKey)
+          }
 
           return true
         })
       } finally {
         drainingQueueRef.current = false
+        // An explicitly selected entry may be waiting on this drain lock.
+        if (pendingManualSendRef.current) {
+          setManualSendRetryTick(tick => tick + 1)
+        }
       }
     },
     [activeQueueSessionKey, onSubmit, sessionId, t.composer]
@@ -393,30 +412,72 @@ export function useComposerQueue({
         return false
       }
 
+      // The first per-row request wins until dispatched or explicitly halted.
+      const previous = pendingManualSendRef.current
+
+      if (previous && getQueueParkRevision(previous.sessionKey) === previous.parkRevision) {
+        return false
+      }
+
+      pendingManualSendRef.current = null
+      parkQueuedPrompts(activeQueueSessionKey)
+
+      const pending = {
+        sessionKey: activeQueueSessionKey,
+        entryId: id,
+        parkRevision: getQueueParkRevision(activeQueueSessionKey),
+        cancelAcknowledged: !busy
+      }
+
       if (busy) {
-        // Promote to the head, then interrupt. The gateway always emits a
-        // settle (message.complete + session.info running:false) when the
-        // turn unwinds, and the busy→false auto-drain below sends this entry.
-        // Unpark first: this interrupt exists to REACH the queue, so the
-        // settle drain must flow — unlike a Stop/Esc halt, which parks.
-        promoteQueuedPrompt(activeQueueSessionKey, id)
-        unparkQueuedPrompts(activeQueueSessionKey)
+        pendingManualSendRef.current = pending
         triggerHaptic('selection')
-        void Promise.resolve(onCancel())
+
+        // A transient idle render is not proof that the cancellation succeeded.
+        // On rejection, leave the selected entry in its parked queue.
+        const onCancelFailed = () => {
+          // A later explicit Stop or new request already superseded this callback.
+          if (
+            pendingManualSendRef.current !== pending ||
+            getQueueParkRevision(pending.sessionKey) !== pending.parkRevision
+          ) {
+            return
+          }
+
+          pendingManualSendRef.current = null
+          notify({ kind: 'error', title: t.composer.queueStuckTitle, message: t.composer.queueStuckBody })
+        }
+
+        try {
+          void Promise.resolve(onCancel())
+            .then(() => {
+              if (pendingManualSendRef.current === pending) {
+                pending.cancelAcknowledged = true
+                setManualSendRetryTick(tick => tick + 1)
+              }
+            })
+            .catch(onCancelFailed)
+        } catch {
+          onCancelFailed()
+          return false
+        }
 
         return true
       }
 
-      // A manual send clears the auto-drain backoff so a stuck entry the user
-      // taps gets a fresh attempt (and re-enables auto-retry on success).
+      // An older drain may still be settling when the UI first renders idle.
+      // Retain the user's selected item until that lock is released.
+      if (drainingQueueRef.current || sessionsLoading) {
+        pendingManualSendRef.current = pending
+        return true
+      }
+
       drainFailuresRef.current.delete(id)
-      // Same for the persisted budget the background drain keeps on the
-      // entry (#98015) — a user gesture is fresh intent, not a replay.
       clearQueuedPromptDrainFailures(activeQueueSessionKey, id)
 
-      return runDrain(entries => entries.find(e => e.id === id))
+      return runDrain(entries => entries.find(e => e.id === id), false)
     },
-    [activeQueueSessionKey, busy, onCancel, queueEdit, runDrain]
+    [activeQueueSessionKey, busy, onCancel, queueEdit, runDrain, sessionsLoading, t.composer]
   )
 
   // Deliver a queued entry as a mid-turn redirect — the queue-panel sibling of
@@ -462,47 +523,11 @@ export function useComposerQueue({
 
       drainFailuresRef.current.delete(id)
       removeQueuedPrompt(activeQueueSessionKey, id)
-      // A steer is the same "keep it moving" intent as a manual send — a park
-      // from an earlier Stop must not hold back what's left of the queue.
-      unparkQueuedPrompts(activeQueueSessionKey)
+      // Steering this entry must not silently resume previously parked messages.
 
       return true
     },
     [activeQueueSessionKey, busy, onSteer, queueEditRef, t.composer]
-  )
-
-  // Double-Enter while busy. The entry usually sits in the queue because the
-  // first Enter's steer didn't land, so retry that: the words join the live
-  // turn as a bubble, with no interrupt and no settle wait. A payload a steer
-  // can't carry (attachments, hidden notes, expanded skills) or a refused
-  // steer falls back to send-now's interrupt.
-  const busyRef = useRef(busy)
-  busyRef.current = busy
-  const steeringIdsRef = useRef(new Set<string>())
-
-  const deliverQueuedNow = useCallback(
-    async (id: string) => {
-      const entry = activeQueueSessionKey ? getQueuedPrompts(activeQueueSessionKey).find(e => e.id === id) : undefined
-
-      if (!busy || !entry || entry.displayKind || entry.displayText || !isSteerableEntry(entry)) {
-        return sendQueuedNow(id)
-      }
-
-      // A repeat Enter mid-steer must not interrupt the turn about to take it.
-      if (steeringIdsRef.current.has(id)) {
-        return true
-      }
-
-      steeringIdsRef.current.add(id)
-      const steered = await steerQueuedNow(id).finally(() => steeringIdsRef.current.delete(id))
-
-      // Settled while we asked: the idle auto-drain already owns the entry.
-      return (
-        steered ||
-        (busyRef.current && getQueuedPrompts(activeQueueSessionKey!).some(e => e.id === id) && sendQueuedNow(id))
-      )
-    },
-    [activeQueueSessionKey, busy, sendQueuedNow, steerQueuedNow]
   )
 
   // Edge-independent auto-drain: send the head whenever the session is idle and
@@ -593,6 +618,36 @@ export function useComposerQueue({
     }
   }, [autoDrainNext, busy, drainRetryTick, queueParked, queuedPrompts.length, sessionsLoading])
 
+  // A manual one-shot bypasses auto-drain only after cancellation succeeds and
+  // the session is idle. Explicit Stop/Esc (including the transcript's Stop)
+  // increments the park revision and invalidates the pending send.
+  useEffect(() => {
+    const pending = pendingManualSendRef.current
+
+    if (!pending) {
+      return
+    }
+
+    if (
+      pending.sessionKey !== activeQueueSessionKey ||
+      getQueueParkRevision(pending.sessionKey) !== pending.parkRevision
+    ) {
+      pendingManualSendRef.current = null
+      return
+    }
+
+    if (busy || sessionsLoading || !pending.cancelAcknowledged || drainingQueueRef.current) {
+      return
+    }
+
+    pendingManualSendRef.current = null
+    drainFailuresRef.current.delete(pending.entryId)
+    clearQueuedPromptDrainFailures(pending.sessionKey, pending.entryId)
+    void runDrain(entries => entries.find(entry => entry.id === pending.entryId), false).catch(() => {
+      notify({ kind: 'error', title: t.composer.queueStuckTitle, message: t.composer.queueStuckBody })
+    })
+  }, [activeQueueSessionKey, busy, manualSendRetryTick, runDrain, sessionsLoading, t.composer])
+
   // Queue-edit cleanup: on session swap the scope effect already stashed the
   // edit snapshot; only restore into the composer when still on the same scope.
   useEffect(() => {
@@ -616,7 +671,6 @@ export function useComposerQueue({
 
   return {
     beginQueuedEdit,
-    deliverQueuedNow,
     drainNextQueued,
     editingQueuedPrompt,
     exitQueuedEdit,

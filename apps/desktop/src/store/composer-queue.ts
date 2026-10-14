@@ -349,10 +349,10 @@ export const enqueueQueuedPrompt = (
   // write from another window that has not fired its storage event yet
   // is merged, not clobbered (#123249).
   mutateSession(sid, queue => [...queue.map(e => (e.drainFailures ? { ...e, drainFailures: undefined } : e)), entry])
-  // Queueing a new prompt is fresh intent to keep the conversation moving —
-  // a park from an earlier Stop must not hold this (or the entries ahead of
-  // it) back.
-  setParked(sid, false)
+  // A fresh prompt explicitly resumes the queue. Use the same revisioned
+  // transition as Resume so any older pending one-shot is invalidated rather
+  // than racing the newly unparked queue's automatic drain.
+  unparkQueuedPrompts(sid)
 
   return entry
 }
@@ -601,6 +601,16 @@ export const migrateQueuedPrompts = (fromKey: string | null | undefined, toKey: 
  * session with nothing queued — parking exists to hold back queued turns, and
  * a park with no queue would only linger as a stale gate.
  */
+// A later park gesture invalidates an in-flight resume or one-shot send,
+// including when the queue was already parked. Scoped by stored session key.
+const queueParkRevisions = new Map<string, number>()
+
+export const getQueueParkRevision = (key: string | null | undefined): number => {
+  const sid = sidOf(key)
+
+  return sid ? (queueParkRevisions.get(sid) ?? 0) : 0
+}
+
 export const parkQueuedPrompts = (key: string | null | undefined): boolean => {
   const sid = sidOf(key)
 
@@ -608,6 +618,7 @@ export const parkQueuedPrompts = (key: string | null | undefined): boolean => {
     return false
   }
 
+  queueParkRevisions.set(sid, getQueueParkRevision(sid) + 1)
   setParked(sid, true)
 
   return true
@@ -618,6 +629,8 @@ export const unparkQueuedPrompts = (key: string | null | undefined): void => {
   const sid = sidOf(key)
 
   if (sid) {
+    // Resume is a new dispatch intent; it supersedes an outstanding one-shot.
+    queueParkRevisions.set(sid, getQueueParkRevision(sid) + 1)
     setParked(sid, false)
   }
 }
