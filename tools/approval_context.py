@@ -334,3 +334,92 @@ def _get_approval_transport_config() -> tuple[str, str | None]:
         # prompt on a built-in surface the operator may not be watching.
         return "config-error", None
     return selected or "builtin", "builtin" if fallback == "builtin" else None
+
+
+# --- Operator-qualified security-policy write context (#81108, #104697 review) --------
+# The ONLY mechanism that authorizes mutating a security-policy config key is a
+# one-shot grant stamped by a HUMAN-ACTOR code path and CONSUMED by the writer:
+#
+#   grant_operator_policy_write() → token → reset_operator_policy_write(token)
+#
+# Both ends are here, and the writer additionally requires a SANCTIONED CALLER
+# FRAME (a human-input handler frame on the live stack — see
+# hermes_cli.config._policy_write_authorized). Why this shape (and not a
+# parameter, an env var, or a reusable boolean scope): the #104697 review
+# established that any *reusable* importable token is forgeable by the agent
+# process that can import the writer (#104059 class). A one-shot grant is
+# forgeable too — agent-executed Python in-process CAN call the granter — so the
+# writer's FRAME check raises the bar against casual import-and-call: the
+# granter is only invoked by the sanctioned human-input paths and the grant is
+# single-use (minted and consumed within one write). This is call discipline,
+# NOT an authority boundary: a caller that routes through the real dispatcher
+# (HermesCLI.process_command("/approvals …")) reaches the granter with genuine
+# frames and no forgery at all, and code-object metadata (function name,
+# co_filename) is caller-controlled, so a forged frame satisfies the checks
+# too (#104697 review round 7 — both routes reproduced against an isolated
+# store). Both are disclosed residuals; the enforceable boundary for
+# worker-executable code is out-of-process. The TUI RPC funnel additionally
+# requires its bound transport to be registered as this process's live gateway
+# channel (#104697 round-6), which a fresh child cannot fake. The gateway
+# /approvals path runs the writer with a grant stamped AFTER its
+# enabled-admin-policy check (the human is the authenticated sender of the
+# slash command), and the grant is consumed before any agent code can race it.
+_operator_policy_write_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "operator_policy_write", default=False)
+
+
+def _is_sanctioned_policy_stamp_caller() -> bool:
+    """True when the caller chain at stamp time is a sanctioned human-input boundary.
+
+    Sanctioned stamp sites:
+    - REPL / TUI slash worker: process_command in cli.py
+    - Gateway: _handle_approvals_command in gateway/slash_commands.py (behind admin check)
+    - TUI RPC: _tui_policy_write in tui_gateway/methods_config_set.py (human renderer RPC)
+
+    Frame inspection forecloses casual import-and-call: a bare
+    grant_operator_policy_write() from agent-executed Python is refused.
+    It is NOT an authority boundary — a caller routing through the real
+    dispatcher (process_command) arrives with genuine frames and needs no
+    forgery, and function name / co_filename are caller-controlled source
+    text, so a compiled frame satisfies this too. Both are disclosed
+    residuals (#104697 review round 7); the enforceable boundary for
+    worker-executable code is out-of-process.
+    """
+    import inspect
+    stack = inspect.stack()
+    for frame_info in stack:
+        fn = frame_info.function
+        raw_path = frame_info.filename or ""
+        path = raw_path.replace(os.sep, "/")
+        if fn == "process_command" and (path.endswith("/cli.py") or path == "cli.py"):
+            return True
+        if fn == "_handle_approvals_command" and (
+            path.endswith("/gateway/slash_commands.py") or path.endswith("gateway/slash_commands.py")
+        ):
+            return True
+        if fn == "_tui_policy_write" and (
+            path.endswith("/tui_gateway/methods_config_set.py") or path.endswith("tui_gateway/methods_config_set.py")
+        ):
+            return True
+    return False
+
+
+def grant_operator_policy_write() -> "contextvars.Token[bool]":
+    """Stamp a one-shot operator-policy write grant. Call ONLY from a sanctioned
+    human-actor path: the gateway /approvals handler (after its enabled-admin
+    check — the human is the authenticated command sender), the interactive
+    operator CLI (the human typing the command via process_command), or the
+    TUI RPC setter."""
+    if not _is_sanctioned_policy_stamp_caller():
+        raise RuntimeError("operator policy write grant requires the sanctioned input boundary")
+    return _operator_policy_write_ctx.set(True)
+
+
+def reset_operator_policy_write(token: "contextvars.Token[bool]") -> None:
+    _operator_policy_write_ctx.reset(token)
+
+
+def is_operator_policy_write() -> bool:
+    """True inside an operator-qualified write scope (see module comment)."""
+    return _operator_policy_write_ctx.get()
+
