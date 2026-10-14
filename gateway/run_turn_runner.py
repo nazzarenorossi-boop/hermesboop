@@ -49,6 +49,16 @@ _CARD_DESTINATION_REFUSALS = {
 }
 
 
+def _append_progress_repeat_count(message: str, occurrences: int) -> str:
+    """Keep a repeated fenced progress message valid for Markdown renderers."""
+    suffix = f"(×{occurrences})"
+    body = message.rstrip("\r\n")
+    if re.search(r"(?:^|\n)[ \t]*```[ \t]*\r?\Z", body):
+        line_end = "\r\n" if message.endswith("\r\n") else "\n"
+        return f"{body}{line_end}{suffix}"
+    return f"{message} {suffix}"
+
+
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
     say so through ``supports_exec_approval_buttons``; anything else (test doubles, relay-style
@@ -311,8 +321,9 @@ class TurnRunner:
         native = sc is not None and getattr(sc, "accepts_tool_progress", False)
         if msg == ctx.last_progress_msg[0]:
             ctx.repeat_count[0] += 1
+            repeated = _append_progress_repeat_count(msg, ctx.repeat_count[0] + 1)
             if native:
-                sc.on_tool_progress(f"{msg} (×{ctx.repeat_count[0] + 1})")
+                sc.on_tool_progress(repeated)
             else:
                 ctx.progress_queue.put(("__dedup__", msg, ctx.repeat_count[0]))
             return
@@ -649,7 +660,7 @@ class TurnRunner:
             _, base_msg, count = raw
             if not st.progress_lines:
                 return base_msg
-            st.progress_lines[-1] = f"{base_msg} (×{count + 1})"
+            st.progress_lines[-1] = _append_progress_repeat_count(base_msg, count + 1)
             return st.progress_lines[-1]
         st.progress_lines.append(raw)
         return raw
