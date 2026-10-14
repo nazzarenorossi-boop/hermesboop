@@ -488,6 +488,28 @@ def _count_session_rows(path: Path) -> Optional[tuple[int, int]]:
         conn.close()
 
 
+def _count_kanban_rows(path: Path) -> Optional[tuple[int, int]]:
+    """Return ``(tasks, task_events)`` stored in a Kanban database *path*.
+
+    Read-only and best effort. ``None`` keeps the import's existing fail-open
+    behavior for SQLite files whose schema is not a Kanban board.
+    """
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(read_only_db_uri(path), uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        events = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+        return int(tasks), int(events)
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
 def _import_db_member(
     zf: zipfile.ZipFile,
     member: str,

@@ -2808,6 +2808,41 @@ class TestImportLiveSessionDatabase:
         assert _count_rows(home / "state.db") == (2, 6)
 
 
+class TestImportKanbanDatabaseWarning:
+    """Regression for #137157: older boards must not be restored silently."""
+
+    def test_import_reports_smaller_kanban_board(self, tmp_path, monkeypatch, capsys):
+        from hermes_cli.backup import run_import
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        live_db = home / "kanban.db"
+        _write_kanban_db(live_db, tasks=3, events=4)
+        staged = tmp_path / "backup-kanban.db"
+        _write_kanban_db(staged, tasks=2, events=2)
+        zip_path = tmp_path / "backup.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("config.yaml", "model: restored\n")
+            zf.write(staged, "kanban.db")
+
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        out = capsys.readouterr().out
+        assert "Kanban board data replaced by older backup contents" in out
+        assert "kanban.db: 3 task(s) / 4 event(s) -> 2 / 2" in out
+
+
+def _write_kanban_db(path: Path, tasks: int, events: int) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY)")
+        conn.executemany("INSERT INTO tasks VALUES (?)", [(str(i),) for i in range(tasks)])
+        conn.executemany("INSERT INTO task_events VALUES (?)", [(i,) for i in range(events)])
+
+
 def _count_rows(db_path: Path) -> tuple[int, int]:
     conn = sqlite3.connect(str(db_path))
     try:

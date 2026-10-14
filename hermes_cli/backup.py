@@ -31,6 +31,7 @@ from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, profile_root_entry
 from hermes_cli.sizefmt import format_bytes as _format_size
 
 from hermes_cli.backup_restore import (
+    _count_kanban_rows,
     _count_session_rows,
     _default_new_file_mode,
     _detect_prefix,
@@ -803,6 +804,8 @@ def run_import(args) -> Optional[int]:
         # import replaced with one holding fewer rows. A restore is allowed to
         # do that — it just must not do it silently (issue #100960).
         db_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
+        # Equivalent warning data for Kanban boards (issue #137157).
+        kanban_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
         home_dir = Path.home().resolve()
         # Resolved once: every member is published via a temp file, and mkstemp
         # would otherwise create newly restored files as 0600.
@@ -897,10 +900,14 @@ def run_import(args) -> Optional[int]:
                     # Count before the write: afterwards the rows this import
                     # drops are gone and there is nothing left to compare.
                     before = _count_session_rows(target)
+                    kanban_before = None if before else _count_kanban_rows(target)
                     _import_db_member(zf, member, target, new_file_mode)
                     after = _count_session_rows(target)
                     if before and after and after[1] < before[1]:
                         db_shrunk.append((rel, before, after))
+                    kanban_after = _count_kanban_rows(target) if kanban_before else None
+                    if kanban_before and kanban_after and kanban_after[1] < kanban_before[1]:
+                        kanban_shrunk.append((rel, kanban_before, kanban_after))
                 else:
                     _extract_member_atomically(zf, member, target, new_file_mode)
                 if target.name in _SECRET_FILE_NAMES:
@@ -940,6 +947,18 @@ def run_import(args) -> Optional[int]:
             for rel, before, after in db_shrunk:
                 print(
                     f"    {rel}: {before[0]} session(s) / {before[1]} message(s)"
+                    f" -> {after[0]} / {after[1]}"
+                )
+            print(
+                "    Anything recorded after the backup was taken is not in it. "
+                f"{_snapshot_recovery_hint()}"
+            )
+
+        if kanban_shrunk:
+            print("\n  ⚠ Kanban board data replaced by older backup contents:")
+            for rel, before, after in kanban_shrunk:
+                print(
+                    f"    {rel}: {before[0]} task(s) / {before[1]} event(s)"
                     f" -> {after[0]} / {after[1]}"
                 )
             print(
