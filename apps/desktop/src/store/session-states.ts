@@ -39,6 +39,7 @@ import { stableArray } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
+import { notifyBehaviorLifecycle } from './composer-behavior'
 import { dropStatusDrawersForProfile, migrateStatusDrawersForProfile } from './composer-status-drawer'
 import { registryConnectionKind } from './connection-registry-state'
 import { recordDislike } from './desktop-metrics'
@@ -2723,18 +2724,11 @@ export function discardSessionTile(storedSessionId: string) {
   saveTiles($sessionTiles.get().filter(t => t.storedSessionId !== storedSessionId))
 }
 
-/**
- * Drop every persisted tile owned by a profile that is being deleted — the
- * profile's own session-tile bucket and any Bot Mode tile whose ownerRoute
- * points at it (matched by desktop profile name, or by exact connection /
- * backend target profile when a source-scoped route is given).
- *
- * A leftover tile RESURRECTS the deleted profile on the next launch: Bot tab
- * restore re-dials the profile's backend, whose ensure_hermes_home() re-creates
- * the profile directory the delete just removed (hermes-agent#94235). Same
- * discard (no ⌘⇧T) semantics as discardSessionTile — undoing the delete of the
- * owning profile would resolve to a 404 again.
- */
+/** Drop a deleted profile's persisted tiles and Bot Mode ownerRoute tiles,
+ * matched by desktop name or exact source connection/backend target profile.
+ * A leftover Bot tile re-dials its backend and ensure_hermes_home() recreates
+ * the deleted profile (#94235). Like discardSessionTile, offer no ⌘⇧T undo:
+ * the deleted owner would resolve to a 404 again. */
 export function dropTilesForProfile(
   profile: string,
   route?: { connectionId?: string; profile?: string; targetProfile?: string }
@@ -2762,6 +2756,7 @@ export function dropTilesForProfile(
   // remotes whose tile key uses the URL fallback. Reuse the writer's resolved
   // connection scope so deletion cannot erase same-named local tabs instead.
   const ambientConnection = tileConnectionId || LOCAL_CONNECTION_ID
+  notifyBehaviorLifecycle({ kind: 'drop', profile: routeTarget || routeProfile || name, connectionId: route ? routeConnection : ambientConnection })
   const removedScope = backendScopeKey(route ? routeConnection : ambientConnection, routeProfile || name)
 
   const ownerMatches = (owner: SessionProfileRoute | undefined): boolean => {
@@ -2898,6 +2893,7 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
   migrateSessionOwnerHintsForProfile(from, to)
   migratePreviewArtifactsForProfile(from, to)
   migrateStatusDrawersForProfile(from, to)
+  notifyBehaviorLifecycle({ kind: 'rename', from, to })
   // Sibling family: the rail's profile-keyed buckets move with the rename, or
   // the renamed profile opens with an empty rail and the old name keeps them.
   migratePreviewTabsForProfile(from, to)

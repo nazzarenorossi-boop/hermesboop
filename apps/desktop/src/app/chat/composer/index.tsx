@@ -13,7 +13,6 @@ import {
 
 import { useTourMarker } from '@/app/chat/tour-marker'
 import type { GatewayRequester } from '@/app/contrib/types'
-import { useHudComposerDrag } from '@/app/hud/composer-drag'
 import { useBusyInputMode } from '@/app/session/hooks/use-busy-input-mode'
 import { composerFloatingStrip, composerInputBacking } from '@/components/chat/composer-dock'
 import { useSetupChatView } from '@/components/onboarding/first-run/assembly'
@@ -32,7 +31,6 @@ import { draftRetry } from '@/store/composer-draft-retry'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts } from '@/store/composer-queue'
-import { $hudMode } from '@/store/hud'
 import { $showsAdvancedChrome } from '@/store/interface-mode'
 import { $chatOnboardingSolo } from '@/store/onboarding-intro'
 import { sessionBlockingPrompt } from '@/store/prompts'
@@ -45,6 +43,7 @@ import { $autoSpeakReplies } from '@/store/voice-prefs'
 import { useTheme } from '@/themes'
 
 import { AttachmentList } from './attachments'
+import { handleBehaviorEnterKey, handleBehaviorSuggestionKey } from './behavior-keys'
 import { deriveBusySubmitState } from './busy-submit-state'
 import { ComposerDockGlow, QueuedEditBanner } from './chat-bar-parts'
 import {
@@ -62,7 +61,7 @@ import { COMPOSER_AREAS } from './contrib'
 import { ComposerControls } from './controls'
 import { ComposerDirectiveActions } from './directive-actions'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
-import { markActiveComposer, onComposerAttachImagesRequest } from './focus'
+import { onComposerAttachImagesRequest } from './focus'
 import { HelpHint } from './help-hint'
 import { useAtCompletions } from './hooks/use-at-completions'
 import { useCardWaitingSubmit } from './hooks/use-card-waiting-submit'
@@ -80,12 +79,14 @@ import { triggerKeyUpHandler, useComposerTrigger } from './hooks/use-composer-tr
 import { useComposerUndo } from './hooks/use-composer-undo'
 import { useComposerUrlDialog } from './hooks/use-composer-url-dialog'
 import { useComposerVoice } from './hooks/use-composer-voice'
+import { useComposerWindowing } from './hooks/use-composer-windowing'
 import { useEmojiCompletions } from './hooks/use-emoji-completions'
 import { useComposerMicroActions } from './hooks/use-micro-actions'
 import { useMiddlewareSubmit } from './hooks/use-middleware-submit'
 import { useSlashCompletions } from './hooks/use-slash-completions'
 import { useStatusDrawer } from './hooks/use-status-drawer'
 import { useSessionStatusPresence } from './hooks/use-status-presence'
+import { useSurfaceComposerBehavior } from './hooks/use-surface-composer-behavior'
 import { shouldConvertPasteToAttachment } from './large-paste'
 import { ActionBadges } from './micro-actions'
 import { chipTypedPathOnSpace, pathifyRefs } from './path-refs'
@@ -147,14 +148,7 @@ export function ChatBar({
   onSubmit: onSubmitProp,
   onTranscribeAudio
 }: ChatBarProps) {
-  const hudMode = useStore($hudMode)
-  const hudWindowing = window.hermesDesktop?.hud?.windowing
-  const hudNativeDrag = hudMode && hudWindowing?.nativeDrag === true
-
-  const { grabbing: hudGrabbing, onPointerDown: onHudDragPointerDown } = useHudComposerDrag(hudMode && !hudNativeDrag, {
-    controlDrag: hudWindowing?.controlDrag === true,
-    workspaceTransfer: hudWindowing?.workspaceTransfer === true
-  })
+  const { hudMode, hudNativeDrag, hudGrabbing, onHudDragPointerDown } = useComposerWindowing()
 
   // Voice-stop interception + contributed middleware wrap every send.
   const { onSubmit, voiceStopRef } = useMiddlewareSubmit(onSubmitProp)
@@ -471,6 +465,12 @@ export function ChatBar({
     triggerKeyConsumedRef,
     triggerLoading
   } = useComposerTrigger({ at, draftRef, editorRef, emoji, recordUndoPoint, requestMainFocus, setComposerText, slash })
+
+  const nextPrompt = useSurfaceComposerBehavior({
+    gateway, profile, sessionId, storedId: queueSessionKey || sessionId, busy, empty: !hasComposerPayload,
+    model: state.model, target: scope.target, placeholder,
+    blockers: [inputDisabled, awaitingInput, blockingPrompt, cardWaiting, queueEdit, queuedPrompts.length, trigger]
+  })
 
   // Pull the live contentEditable text into draftRef + the AUI composer state
   // (which drives `hasComposerPayload` → the send button). Shared by the input
@@ -891,6 +891,15 @@ export function ChatBar({
       }
     }
 
+    if (handleBehaviorSuggestionKey(event, {
+      text: nextPrompt.text, blocked: Boolean(trigger || busy || cardWaiting),
+      readDraft: () => liveComposerDraft(editorRef.current, draftRef.current), hasAttachments: attachments.length > 0,
+      decide: nextPrompt.decide, markConsumed: () => { triggerKeyConsumedRef.current = true },
+      consume: text => { withUndoPoint(() => { loadIntoComposer(text, []);
+
+ return true }) }
+    })) { return }
+
     // ArrowUp/ArrowDown navigate, in priority order: the queue (edit entries in
     // place) then sent-message history. The history ring is derived from live
     // session messages each press — single source of truth, no mirror.
@@ -963,26 +972,12 @@ export function ChatBar({
       return
     }
 
-    // Cmd/Ctrl+Enter queues a follow-up while a turn runs. Plain Enter steers
-    // a text-only draft, so both live-turn actions stay reachable by keyboard.
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
-      event.preventDefault()
-
-      if (busy && !disabled) {
-        // As with plain Enter, source the just-typed content from the DOM so a
-        // fast keypress cannot queue a stale draft.
-        const editorText = liveComposerDraft(editorRef.current, draftRef.current)
-
-        if (editorText !== draftRef.current) {
-          draftRef.current = editorText
-          setComposerText(editorText)
-        }
-
-        queueDraft()
-      }
-
-      return
-    }
+    if (handleBehaviorEnterKey(event, {
+      busy, disabled: Boolean(disabled), inputDisabled: Boolean(inputDisabled), nativeSubmit: Boolean(cardWaiting || queueEdit),
+      readDraft: () => liveComposerDraft(editorRef.current, draftRef.current),
+      syncDraft: text => { draftRef.current = text; setComposerText(text) },
+      submit: submitDraft, steer: () => { steerDraft('steer') }, queue: queueDraft
+    })) { return }
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
@@ -1000,14 +995,15 @@ export function ChatBar({
         return
       }
 
+
       if (!busy && !hasLivePayload && queuedPrompts.length > 0) {
         void drainNextQueued()
 
         return
       }
 
-      // Empty Enter while busy. With prompts queued this is the double-send:
-      // the first Enter put the words in the queue, a second delivers them
+      // The native (extension-free) empty Enter delivers the queue head:
+      // the extension's queue/steer branches return before this fallback.
       // now — steered into the live turn when a steer can carry them, else
       // promote + interrupt + drain on settle — mirroring the idle empty-Enter
       // drain above. With nothing queued it stays a no-op — interrupting is
@@ -1174,7 +1170,7 @@ export function ChatBar({
           hudNativeDrag && '[-webkit-app-region:no-drag]'
         )}
         contentEditable={!inputDisabled}
-        data-placeholder={placeholder}
+        {...nextPrompt.inputProps}
         data-slot={RICH_INPUT_SLOT}
         dir={textDirection}
         onBeforeInput={handleEditorBeforeInput}
@@ -1218,7 +1214,6 @@ export function ChatBar({
         onCut={handleCut}
         onDragOver={handleInputDragOver}
         onDrop={handleInputDrop}
-        onFocus={() => markActiveComposer(scope.target)}
         onInput={handleEditorInput}
         onKeyDown={handleEditorKeyDown}
         onKeyUp={handleEditorKeyUp}
