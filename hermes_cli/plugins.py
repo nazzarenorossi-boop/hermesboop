@@ -283,6 +283,12 @@ class PluginContext:
         return PluginState(self.plugin_id, self.manifest.skill_namespace)
 
     @cached_property
+    def goals(self):
+        """Ownership-aware persistent session-goal facade for this plugin."""
+        from hermes_cli.plugin_goals import PluginGoals
+        return PluginGoals(self.plugin_id)
+
+    @cached_property
     def platform_actions(self):
         """Capability-gated platform action facade (``add_reaction``, ``set_thread_title``). Every call
         re-checks ``gateway.platform_actions`` (legacy ``plugins.entries.<id>.allow_platform_actions``,

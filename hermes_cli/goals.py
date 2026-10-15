@@ -451,6 +451,9 @@ class GoalState:
     contract: GoalContract = field(default_factory=GoalContract)
     # /goal gate add <cmd>: ALL must pass before the judge may declare done.
     gates: list[GoalGate] = field(default_factory=list)
+    # The plugin id that created this goal. ``None`` denotes a user-created
+    # goal and remains the value for state written before plugin goals existed.
+    owner: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -472,6 +475,7 @@ class GoalState:
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
             waiting_reason=data.get("waiting_reason"),
+            owner=(str(data["owner"]) if data.get("owner") else None),
             contract=GoalContract.from_dict(data.get("contract")),
             gates=[
                 GoalGate.from_dict(g) for g in (data.get("gates") or [])
@@ -1103,18 +1107,35 @@ class GoalManager:
 
     @property
     def state(self) -> Optional[GoalState]:
+        self.refresh()
+        return self._state
+
+    def refresh(self) -> Optional[GoalState]:
+        """Reload durable state so another surface cannot leave this manager stale.
+
+        A transiently unavailable SessionDB is indistinguishable from an absent
+        row at this boundary. Keep a live in-memory goal in that case, matching
+        the existing fail-open behavior for a dropped state write.
+        """
+        loaded = load_goal(self.session_id)
+        if loaded is not None or self._state is None:
+            self._state = loaded
         return self._state
 
     def is_active(self) -> bool:
+        self.refresh()
         return self._state is not None and self._state.status == "active"
 
     def has_goal(self) -> bool:
+        self.refresh()
         return self._state is not None and self._state.status in {"active", "paused"}
 
     def has_contract(self) -> bool:
+        self.refresh()
         return self._state is not None and self._state.has_contract()
 
     def status_line(self) -> str:
+        self.refresh()
         s = self._state
         if s is None or s.status == "cleared":
             return "No active goal. Set one with /goal <text>."
@@ -1147,11 +1168,13 @@ class GoalManager:
         return self._state
 
     def _require_goal(self) -> GoalState:
+        self.refresh()
         if self._state is None or not self.has_goal():
             raise RuntimeError("no active goal")
         return self._state
 
     def _require_active(self) -> GoalState:
+        self.refresh()
         if self._state is None or self._state.status != "active":
             raise RuntimeError("no active goal to park")
         return self._state
@@ -1165,7 +1188,10 @@ class GoalManager:
         self._pause_state(paused_reason)
         return _decision("paused", False, None, verdict, reason, message)
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None, contract: Optional[GoalContract] = None) -> GoalState:
+    def set(
+        self, goal: str, *, max_turns: Optional[int] = None,
+        contract: Optional[GoalContract] = None, owner: Optional[str] = None,
+    ) -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -1173,17 +1199,20 @@ class GoalManager:
             goal=goal, status="active", turns_used=0, created_at=time.time(), last_turn_at=0.0,
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             contract=contract if contract is not None else GoalContract(),
+            owner=owner,
         )
         return self._save()
 
     def set_contract(self, contract: GoalContract) -> Optional[GoalState]:
         """Attach or replace the completion contract on the active goal."""
+        self.refresh()
         if self._state is None:
             return None
         self._state.contract = contract or GoalContract()
         return self._save()
 
     def pause(self, reason: str = "user-paused") -> Optional[GoalState]:
+        self.refresh()
         if not self._state:
             return None
         self._state.status = "paused"
@@ -1192,6 +1221,7 @@ class GoalManager:
         return self._save()
 
     def resume(self, *, reset_budget: bool = True) -> Optional[GoalState]:
+        self.refresh()
         if not self._state:
             return None
         self._state.status = "active"
@@ -1202,6 +1232,7 @@ class GoalManager:
         return self._save()
 
     def clear(self) -> None:
+        self.refresh()
         if self._state is None:
             return
         self._state.status = "cleared"
@@ -1209,6 +1240,7 @@ class GoalManager:
         self._state = None
 
     def mark_done(self, reason: str) -> None:
+        self.refresh()
         if not self._state:
             return
         self._state.status = "done"
@@ -1254,6 +1286,7 @@ class GoalManager:
 
     def render_subgoals(self) -> str:
         """Public helper for the /subgoal slash command."""
+        self.refresh()
         if self._state is None:
             return "(no active goal)"
         return self._state.render_subgoals_block() or "(no subgoals — use /subgoal <text> to add criteria)"
@@ -1285,6 +1318,7 @@ class GoalManager:
 
     def render_gates(self) -> str:
         """Public helper for the /goal gate slash command."""
+        self.refresh()
         if self._state is None:
             return "(no active goal)"
         if not self._state.gates:
@@ -1399,6 +1433,7 @@ class GoalManager:
 
     def stop_waiting(self) -> bool:
         """Clear any active wait barrier (pid / session / time). Returns True if one was cleared."""
+        self.refresh()
         s = self._state
         if s is None or (s.waiting_on_pid is None and s.waiting_on_session is None and not s.waiting_until):
             return False
@@ -1412,6 +1447,7 @@ class GoalManager:
         also expires after ``_MAX_BARRIER_WAIT_S``: a watcher or poller that never exits would
         otherwise park the goal indefinitely (one run sat 3 h 22 min on a poller that outlived
         the work it was polling)."""
+        self.refresh()
         s = self._state
         if s is None:
             return False
@@ -1485,6 +1521,7 @@ class GoalManager:
         """Run gates + judge and update state. Return a decision dict (``status``, ``should_continue``,
         ``continuation_prompt``, ``verdict``, ``reason``, ``message``). Both real user prompts and our
         own continuations increment ``turns_used`` — both consume model budget."""
+        self.refresh()
         state = self._state
         if state is None or state.status != "active":
             return _decision(state.status if state else None, False, None, "inactive", "no active goal", "")
@@ -1564,6 +1601,7 @@ class GoalManager:
         )
 
     def next_continuation_prompt(self) -> Optional[str]:
+        self.refresh()
         s = self._state
         if not s or s.status != "active":
             return None
@@ -1579,6 +1617,7 @@ class GoalManager:
 
     def render_contract(self) -> str:
         """Public helper for the /goal show + /goal draft slash commands."""
+        self.refresh()
         if self._state is None:
             return "(no active goal)"
         return self._state.contract.render_block() if self._state.has_contract() else (
