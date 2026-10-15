@@ -19,6 +19,7 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tools import async_delegation as ad
 from tui_gateway import server
 from tui_gateway.transport import bind_transport, reset_transport
+from tests.fakes.immediate_thread import ImmediateThread
 
 
 def _dispatch_sync(req: dict, transport=None) -> dict | None:
@@ -370,14 +371,6 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
                 )
             raise BrokenPipeError("broken pipe")
 
-    class _ImmediateThread:
-        def __init__(self, target=None, **_kwargs):
-            self._target = target
-
-        def start(self):
-            assert self._target is not None
-            self._target()
-
     session = _session(agent=None, agent_ready=threading.Event())
     server._sessions["iso-fallback"] = session
     inline_calls = []
@@ -394,7 +387,7 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
         "_run_prompt_submit",
         lambda rid, sid, _session, text, **_kwargs: inline_calls.append((rid, sid, text)),
     )
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
 
     try:
         resp = server.handle_request(
@@ -629,14 +622,6 @@ def test_slash_exec_compress_flag_on_applies_host_control_mirror(monkeypatch):
 
 
 def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_kwargs):
-            self._target = target
-
-        def start(self):
-            assert self._target is not None
-            self._target()
-
     class _Agent:
         model = "gold-model"
         provider = "gold-provider"
@@ -665,7 +650,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
 
     fixed_info = {"model": "gold-model", "provider": "gold-provider", "usage": {"total": 15}}
     usage = server._get_usage(_Agent())
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
     monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: dict(fixed_info))
@@ -1413,7 +1398,7 @@ def test_run_prompt_submit_never_ticks_after_message_complete(monkeypatch):
         "_start_usage_ticker",
         lambda sid, agent, interval=1.0: real_ticker(sid, agent, interval=0.01),
     )
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
@@ -7776,19 +7761,8 @@ def test_notification_poller_delivers_owned_events(
 def _configure_immediate_prompt_run(
     monkeypatch, tmp_path, *, immediate_threads=True
 ):
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_kwargs):
-            self._target = target
-
-        def start(self):
-            if self._target is not None:
-                self._target()
-
-        def is_alive(self):
-            return False
-
     if immediate_threads:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
     monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
@@ -8676,13 +8650,6 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
         def set_session_title(self, _key, _title):
             raise ValueError("Title already in use")
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **kw):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     agent = _Agent()
     session = {
         "agent": agent,
@@ -8708,7 +8675,7 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
     monkeypatch.setattr(
         server, "_sync_session_key_after_compress", lambda *a, **kw: None
     )
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
 
     try:
         server.handle_request(
@@ -11586,15 +11553,8 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     server._sessions["sid"] = _session(agent=_Agent())
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
@@ -11626,13 +11586,6 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     fake_ctx = types.ModuleType("agent.context_references")
     fake_ctx.preprocess_context_references = (
         lambda message, **kwargs: types.SimpleNamespace(
@@ -11647,7 +11600,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
     fake_meta.get_model_context_length = lambda *args, **kwargs: 100000
 
     server._sessions["sid"] = _session(agent=_Agent())
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
@@ -13202,18 +13155,11 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
                 "messages": [{"role": "assistant", "content": "agent reply"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     server._sessions["sid"] = _session(agent=_RacyAgent())
     session_ref["s"] = server._sessions["sid"]
     emits: list[tuple] = []
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: emits.append(a))
@@ -13295,13 +13241,6 @@ def test_prompt_submit_merges_on_model_switch_marker(monkeypatch):
         from tui_gateway.server import _is_model_switch_marker
         return _is_model_switch_marker(entry)
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     # Test both: no prior marker, and prior marker present
     for label, prior_history in [
         ("no prior marker", [{"role": "user", "content": "hello"}]),
@@ -13318,7 +13257,7 @@ def test_prompt_submit_merges_on_model_switch_marker(monkeypatch):
         session_ref["s"] = server._sessions["sid"]
         emits: list[tuple] = []
         try:
-            monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+            monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
             monkeypatch.setattr(server, "_get_usage", lambda _a: {})
             monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
             monkeypatch.setattr(server, "_emit", lambda *a: emits.append(a))
@@ -13394,13 +13333,6 @@ def test_prompt_submit_merges_on_personality_pivot_marker(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     server._sessions["sid"] = _session(
         agent=_PivotAgent(),
         history=[{"role": "user", "content": "hello"}],
@@ -13408,7 +13340,7 @@ def test_prompt_submit_merges_on_personality_pivot_marker(monkeypatch):
     session_ref["s"] = server._sessions["sid"]
     emits: list[tuple] = []
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_session_info", lambda *a, **k: {})
@@ -13464,17 +13396,10 @@ def test_prompt_submit_sanitizes_bracketed_paste_before_agent(monkeypatch):
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **kw):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     corrupted = "hello[" + "~[[e" * 8
     server._sessions["sid"] = _session(agent=_Agent())
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -13505,17 +13430,10 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
                 "messages": [{"role": "assistant", "content": "reply"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     server._sessions["sid"] = _session(agent=_Agent())
     emits: list[tuple] = []
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: emits.append(a))
@@ -13560,13 +13478,6 @@ def test_prompt_submit_snapshots_history_after_pending_model_switch(monkeypatch)
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, **_kwargs):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     def _apply_pending(_sid, session):
         with session["history_lock"]:
             session["history"].append(marker)
@@ -13576,7 +13487,7 @@ def test_prompt_submit_snapshots_history_after_pending_model_switch(monkeypatch)
     server._sessions["sid"]["pending_model_switch"] = {"raw": "new-model"}
     emits = []
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_apply_pending_model_switch", _apply_pending)
         monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda *_a: None)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
@@ -13615,13 +13526,6 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     original_history = [
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "first reply"},
@@ -13650,7 +13554,7 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
     stub_db = _StubDb()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -13836,13 +13740,6 @@ def test_prompt_submit_truncate_ordinal_skips_display_kind_rows(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     original_history = [
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "first reply"},
@@ -13876,7 +13773,7 @@ def test_prompt_submit_truncate_ordinal_skips_display_kind_rows(monkeypatch):
     stub_db = _StubDb()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -13936,13 +13833,6 @@ def test_prompt_submit_truncate_translates_display_prefix_ordinal(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     tip_history = [
         {"role": "user", "content": "post-compress A"},
         {"role": "assistant", "content": "reply A"},
@@ -13987,7 +13877,7 @@ def test_prompt_submit_truncate_translates_display_prefix_ordinal(monkeypatch):
     stub_db = _StubDb()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -17261,7 +17151,7 @@ def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch, tmp_pa
     del old
     server._sessions["sid_trim"] = session
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -17278,16 +17168,6 @@ def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch, tmp_pa
         assert observed["alive_at_trim"] is False, "a pre-turn history snapshot survived to the heap trim"
     finally:
         server._sessions.pop("sid_trim", None)
-
-
-class _ImmediateThread:
-    """Runs the target callable synchronously so assertions can follow."""
-
-    def __init__(self, target=None, daemon=None, **_thread_options):
-        self._target = target
-
-    def start(self):
-        self._target()
 
 
 def test_prompt_submit_wires_live_title_rename_callback(monkeypatch):
@@ -17317,7 +17197,7 @@ def test_prompt_submit_wires_live_title_rename_callback(monkeypatch):
     agent = _Agent()
     server._sessions["sid"] = _session(agent=agent)
     emitted = []
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(
         server, "_emit", lambda kind, sid, payload=None, **kw: emitted.append((kind, payload))
     )
@@ -17367,7 +17247,7 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
             }
 
     server._sessions["sid"] = _session(agent=_Agent())
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(
@@ -17411,7 +17291,7 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
             }
 
     server._sessions["sid"] = _session(agent=_Agent())
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
 
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(
@@ -18829,15 +18709,9 @@ def test_notification_poller_delivers_completion(monkeypatch):
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-        def start(self):
-            self._target()
-
     sess = _session(agent=_Agent())
     server._sessions["sid_poll"] = sess
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
@@ -18897,15 +18771,9 @@ def test_notification_poller_skips_consumed(monkeypatch):
             turns.append(prompt)
             return {"final_response": "ok", "messages": []}
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-        def start(self):
-            self._target()
-
     sess = _session(agent=_Agent())
     server._sessions["sid_skip"] = sess
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
@@ -21387,16 +21255,9 @@ def test_prompt_submit_passes_persist_user_message_to_agent(monkeypatch):
                 "messages": [{"role": "assistant", "content": "reply"}],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     server._sessions["sid"] = _session(agent=_Agent())
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_emit", lambda *a: None)
@@ -21735,13 +21596,6 @@ def test_personality_marker_does_not_shift_truncate_ordinal(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     class _StubDb:
         def __init__(self):
             self.replaced = []
@@ -21793,7 +21647,7 @@ def test_personality_marker_does_not_shift_truncate_ordinal(monkeypatch):
         history_before = list(session["history"])
         third_index = history_before.index({"role": "user", "content": "third"})
 
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
         monkeypatch.setattr(server, "_get_db", lambda: stub_db)
@@ -21855,13 +21709,6 @@ def test_prompt_submit_truncation_archives_instead_of_deleting(monkeypatch):
                 ],
             }
 
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None, **_thread_options):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     class _StubDb:
         def get_messages_as_conversation(self, *_args, **_kwargs):
             return []
@@ -21889,7 +21736,7 @@ def test_prompt_submit_truncation_archives_instead_of_deleting(monkeypatch):
     )
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
         monkeypatch.setattr(server, "_session_info", lambda *a, **k: {})
         monkeypatch.setattr(server, "_emit", lambda *a: None)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
