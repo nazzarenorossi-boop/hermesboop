@@ -3802,7 +3802,9 @@ export const frOverrides = {
     },
     statusDivider: {
       working: 'En cours',
-      done: 'Terminées'
+      blocked: 'Bloquées',
+      ready: 'Prêtes',
+      inactive: 'Inactives'
     },
     markAllRead: 'Tout marquer comme lu'
   },

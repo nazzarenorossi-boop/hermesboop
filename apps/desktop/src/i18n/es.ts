@@ -3788,7 +3788,9 @@ export const esOverrides = {
     },
     statusDivider: {
       working: 'En progreso',
-      done: 'Completado'
+      blocked: 'Bloqueadas',
+      ready: 'Listas',
+      inactive: 'Inactivas'
     },
     markAllRead: 'Marcar todo como leído'
   },
