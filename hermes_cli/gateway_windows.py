@@ -8,6 +8,7 @@ hidden-console launcher instead of ``schtasks /Run`` so start/restart behavior i
 from __future__ import annotations
 
 import ctypes
+import csv
 import json
 import locale
 import logging
@@ -495,7 +496,23 @@ def _atomic_write(path: Path, content: str, tmp: Path) -> None:
 # ── Install / uninstall
 
 def _resolve_task_user() -> str | None:
-    """Return ``DOMAIN\\USER`` if available, else bare USERNAME, else None."""
+    """Return the current Windows principal, falling back to the legacy environment values."""
+    try:
+        result = subprocess.run(
+            ["whoami", "/fo", "csv", "/nh"],
+            capture_output=True,
+            text=False,
+            timeout=5,
+            creationflags=windows_hide_flags(),
+            check=False,
+        )
+        if result.returncode == 0:
+            rows = list(csv.reader(_decode_schtasks_output(result.stdout or b"").splitlines()))
+            if len(rows) == 1 and len(rows[0]) == 1 and rows[0][0]:
+                return rows[0][0]
+    except (OSError, subprocess.TimeoutExpired, csv.Error):
+        pass
+
     username = os.environ.get("USERNAME") or os.environ.get("USER") or os.environ.get("LOGNAME")
     if not username:
         return None
