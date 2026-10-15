@@ -500,6 +500,29 @@ async def test_request_restart_skips_wait_when_only_wedged_turns(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wait_kind", ("approval", "clarify"))
+async def test_request_restart_skips_wait_for_turn_blocked_on_human_response(monkeypatch, wait_kind):
+    """A restart cannot wait for a response from a client it has just refused (#139041)."""
+    from tools import approval, clarify_gateway
+
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._restart_after_turn_timeout = 300.0
+    session_key = "agent:main:telegram:dm:1"
+    runner._running_agents[session_key] = _live_agent()
+    monkeypatch.setattr(approval, "has_blocking_approval", lambda key: wait_kind == "approval" and key == session_key)
+    monkeypatch.setattr(clarify_gateway, "has_pending", lambda key: wait_kind == "clarify" and key == session_key)
+
+    assert runner.request_restart(detached=False, via_service=True) is True
+    await asyncio.wait_for(runner._restart_task, timeout=5.0)
+
+    runner.stop.assert_awaited_once_with(
+        restart=True, detached_restart=False, service_restart=True
+    )
+    assert runner._running_agents
+
+
+@pytest.mark.asyncio
 async def test_request_restart_still_waits_for_live_turn_alongside_wedged(monkeypatch):
     """Mixed live + wedged: the live turn is honored, the wedged one ignored."""
     monkeypatch.delenv("HERMES_AGENT_TIMEOUT", raising=False)

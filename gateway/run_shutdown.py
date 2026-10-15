@@ -1559,11 +1559,29 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             and (idle := _idle_seconds(agent)) is not None and idle >= timeout
         )
 
+    def _human_wait_chat_agent_count(self) -> int:
+        """Running chat turns blocked on an approval or clarify response.
+
+        A restart has already refused the clients that could provide either response, so waiting
+        for these turns only holds the gateway in ``draining`` until the cap. ``stop()`` then
+        interrupts the turns and their existing cleanup withdraws the pending prompt.
+        """
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from tools.approval import has_blocking_approval
+        from tools.clarify_gateway import has_pending
+        return sum(
+            1
+            for session_key, agent in list((getattr(self, "_running_agents", None) or {}).items())
+            if agent is not None and agent is not _AGENT_PENDING_SENTINEL
+            and (has_blocking_approval(session_key) or has_pending(session_key))
+        )
+
     def _awaitable_work_count(self) -> int:
         """Active work minus the units the restart wait must not hold for.
 
-        Two disjoint exclusions: wedged turns (idle past ``agent.gateway_timeout`` / past the cron
-        in-flight allowance — restart is their remedy, #115469) and cron runs executing in a
+        Three disjoint exclusions: wedged turns (idle past ``agent.gateway_timeout`` / past the cron
+        in-flight allowance — restart is their remedy, #115469), chat turns blocked on a response
+        from a client the restart has refused, and cron runs executing in a
         restart-safe external worker (``_restart_safe_cron_count``), which outlives this process
         either way. Cron runs are counted per profile-scoped run by the scheduler, not by
         subtracting from the bare-ID active count: two profiles can run the same job ID, and one
@@ -1576,7 +1594,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._active_deferred_agent_worker_count()
         )
         return (
-            max(0, non_cron - self._wedged_chat_agent_count())
+            max(0, non_cron - self._wedged_chat_agent_count() - self._human_wait_chat_agent_count())
             + self._restart_wait_cron_counts()["awaitable"]
         )
 
