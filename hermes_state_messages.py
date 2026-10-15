@@ -24,6 +24,7 @@ from hermes_state_common import (
     _json_or, _legacy_reset_child_sql, _placeholders, _sql_json_extract)
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json)
+from hermes_state_write_guards import REVIEW_LEASE_IGNORE, REVIEW_LEASE_YIELD
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -49,8 +50,6 @@ _BUMP_GENERATION_SQL = """
                 SET generation = conversation_generations.generation + 1
             """
 
-_TURN_LEASE_ROW_SQL = "SELECT holder, expires_at FROM session_turn_leases WHERE conversation_id = ?"
-_DELETE_COMPRESSION_LOCK_SQL = "DELETE FROM compression_locks WHERE session_id = ? AND holder = ?"
 _DISPLAY_ACTIVE_CLAUSE = " AND (active = 1 OR compacted = 1)"
 # Model-only rows (see MODEL_ONLY_DISPLAY_METADATA_KEY) never enter a display projection. Unqualified on
 # purpose: inside a correlated subquery it binds to the innermost ``messages`` alias.
@@ -109,12 +108,6 @@ def _tool_calls_len(raw: Any, scalar: int = 0) -> int:
 def _scrub_surrogates(value: Any) -> Any:
     """Lone surrogates make sqlite3 raise UnicodeEncodeError and abort the whole write."""
     return _sanitize_surrogates(value) if isinstance(value, str) else value
-
-
-def _stale_holder(row, now: float) -> bool:
-    """A lock/lease row whose holder is expired or a provably dead local process."""
-    from hermes_state import _compression_lock_holder_process_is_dead
-    return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
 
 
 class SessionMessagesMixin:
@@ -206,63 +199,6 @@ class SessionMessagesMixin:
         (get_messages -> replace_messages) hand back raw TEXT; re-dumping would double-encode it and
         reasoning-replay consumers (``isinstance(..., list)``) would drop it."""
         return None if not value else (value if isinstance(value, str) else json.dumps(value))
-
-    def _check_transcript_write_guards(self, conn, session_id: str, compression_lock_holder: Optional[str],
-        turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
-        reject_active_turn_lease: bool = False, reject_active_compression_lock: bool = False,
-        allow_closed_compression_parent: bool = False) -> None:
-        """Transcript-write admission checks, run INSIDE the write txn by every writer. Ordinary appends do
-        NOT check compression_locks: the lock only stops two COMPRESSIONS colliding and archive_and_compact()
-        commits against a watermark, so concurrent appends are safe (blocking them killed turns during slow
-        summaries). Destructive user mutations opt in via ``reject_active_*`` so a compressor that captured
-        its watermark cannot resurrect the removed turn.
-
-        Shared by :meth:`append_message` and :meth:`append_messages_batch` so the two writers can never
-        diverge on these correctness invariants (this guard has already needed targeted fixes — see the
-        #74478 patience note below). User-initiated transcript mutations may opt in to rejecting an active
-        unowned turn lease in that same transaction.
-        """
-        from hermes_state import SessionCompressionInProgressError
-        from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
-        # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
-        # COMPRESSIONS colliding, not to fence ordinary transcript writes. Concurrent appends during a
-        # compression are safe by construction: archive_and_compact() commits against a watermark captured
-        # at compression start and clones every row that arrived after it back into the live transcript, in
-        # the same write transaction. Blocking appends here was the root cause of a whole symptom family —
-        # turns dying as session_persistence_failed while a slow provider summary held the lease (#74568,
-        # #77386), including stale locks from dead PIDs blocking writes for the full TTL. Keep that narrow
-        # fence opt-in so ordinary appends retain the watermark behavior.
-        if reject_active_compression_lock:
-            active_lock = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
-            if active_lock is not None:
-                if _stale_holder(active_lock, time.time()):
-                    conn.execute(_DELETE_COMPRESSION_LOCK_SQL, (session_id, active_lock["holder"]))
-                elif active_lock["holder"] != compression_lock_holder:
-                    raise SessionCompressionInProgressError(
-                        f"Session {session_id!r} is being compressed by another writer")
-        if turn_lease_holder or reject_active_turn_lease:
-            conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
-            lease = conn.execute(_TURN_LEASE_ROW_SQL, (conversation_id,)).fetchone()
-            now = time.time()
-            if turn_lease_holder:
-                if lease is None or lease["holder"] != turn_lease_holder:
-                    raise SessionTurnLeaseLostError(
-                        f"Session turn lease lost; refusing transcript write for {session_id!r}")
-                if float(lease["expires_at"]) <= now:
-                    # Expiry makes the row reclaimable, not taken over; BEGIN IMMEDIATE serializes this
-                    # renewal with acquisition, so a still-matching owner recovers from a starved refresher.
-                    conn.execute("UPDATE session_turn_leases SET expires_at = ? "
-                        "WHERE conversation_id = ? AND holder = ?",
-                        (now + max(0.1, float(turn_lease_ttl_seconds)), conversation_id, turn_lease_holder))
-            elif lease is not None:
-                if not _stale_holder(lease, now):
-                    raise SessionTurnLeaseLostError(
-                        f"Session has an active turn lease; refusing transcript mutation for {session_id!r}")
-                # Same reclaim rule as acquisition; deleting also fences a stale late flush after the mutation.
-                conn.execute("DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
-                    (conversation_id, lease["holder"]))
-        if _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()) and not allow_closed_compression_parent:
-            raise CompressionSessionClosedError(session_id)
 
     def _message_row_params(self, session_id: str, role: str, msg: dict[str, Any], tool_calls: Any,
         message_timestamp: float, *, keep_reasoning: bool) -> tuple:
@@ -448,7 +384,9 @@ class SessionMessagesMixin:
                 (session_id, delegation_id, metadata.get("delivery_notice", ""))).fetchone()
             if existing is not None:
                 return existing[0]
-            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True)
+            # An append after the review's snapshot: a live review neither refuses it nor yields to it.
+            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True,
+                                                review_lease_policy=REVIEW_LEASE_IGNORE)
             msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
             self._bump_session_counters(conn, session_id, 1, 0, unit=True)
             return msg_id
@@ -842,7 +780,8 @@ class SessionMessagesMixin:
         def _do(conn):
             if reject_active_turn_lease:
                 self._check_transcript_write_guards(
-                    conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True)
+                    conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True,
+                    review_lease_policy=REVIEW_LEASE_YIELD)
             elif _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()):
                 raise CompressionSessionClosedError(session_id)
             kept = kept_tool_calls = 0

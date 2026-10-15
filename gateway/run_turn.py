@@ -25,6 +25,7 @@ from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
+from gateway.run_turn_review import _GatewayReviewAdmission, begin_gateway_review_admission
 from gateway.response_filters import (
     display_kind_for_event, display_metadata_for_event, is_machinery_display_kind, reply_expected_metadata,
     silence_allowed,
@@ -228,6 +229,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         if resolved is None:
             return
         source, session_entry, session_key = resolved
+        # Live in review admission from here; its completion is parked on the delivery owner.
+        gateway_review_admission = await begin_gateway_review_admission(self, event, source, session_entry, _quick_key)
         prepared, _session_env_tokens = await self._hmwa_prepare_turn(
             event, source, session_entry, session_key, _quick_key, run_generation,
         )
@@ -281,6 +284,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                     **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event)},
                 message_type=event.message_type,
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
+                gateway_review_admission=gateway_review_admission,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
@@ -1750,21 +1754,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
             elif pending_event and adapter and session_key:
                 # User steered during the turn, but a background event or queued message arrived.
-                # Deliver the user's steer first and restore the pending event to the head of the queue.
-                overflow = self._overflow_queue(session_key)
-                if hasattr(adapter, "_pending_messages") and isinstance(adapter._pending_messages, dict):
-                    promoted = adapter._pending_messages.get(session_key)
-                    if promoted is not None:
-                        if overflow is not None:
-                            overflow.insert(0, promoted)
-                        else:
-                            self._session_state(session_key).conversation.queued_events.insert(0, promoted)
-                    adapter._pending_messages[session_key] = pending_event
-                else:
-                    if overflow is not None:
-                        overflow.insert(0, pending_event)
-                    else:
-                        self._session_state(session_key).conversation.queued_events.insert(0, pending_event)
+                # Deliver the user's steer first; the restored event is the accepted follow-up
+                # behind it, published through the review fence like every other slot write.
+                self._restore_dequeued_event(session_key, adapter, pending_event)
                 pending_event = None
                 pending = leftover_steer
                 logger.debug(
@@ -1891,7 +1883,6 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         response: Any, result: Any, stream_task: Any,
     ) -> Any:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
-        from gateway.platforms.base import merge_pending_message_event
         from gateway.run import _preserve_queued_followup_history_offset
         source, session_id, session_key, run_generation = (
             turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
@@ -1915,7 +1906,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             )
             adapter = self._delivery_adapter_for(source)
             if adapter and pending_event:
-                merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+                # Fenced merge: this re-queue is the next live turn, so it must publish to review
+                # admission like every other slot write (_hm_merge_pending_for_source).
+                self._hm_merge_pending_for_source(source, session_key, pending_event)
             elif adapter and hasattr(adapter, 'queue_message'):
                 adapter.queue_message(session_key, pending)
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
@@ -2025,6 +2018,10 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 persist_user_display_metadata={
                     **display_metadata_for_event(pending_event),
                     **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event)} or None,
+                # Bound to the OUTER admission like the first turn (``bind_agent`` runs per turn, so
+                # a superseded candidate never outlives its follow-up); read like
+                # ``_wire_turn_agent_callbacks``: upstream's turn-context doubles lack the field.
+                gateway_review_admission=getattr(turn_ctx, "gateway_review_admission", None),
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -2353,6 +2350,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         reply_expected: Optional[bool] = None,
         scheduled_heartbeat: bool = False,
         title_user_message: Optional[str] = None,
+        gateway_review_admission: Optional[_GatewayReviewAdmission] = None,
     ) -> dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -2397,7 +2395,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
             reply_expected=reply_expected,
-            persist_user_display_metadata=persist_user_display_metadata, scheduled_heartbeat=scheduled_heartbeat,
+            persist_user_display_metadata=persist_user_display_metadata,
+            scheduled_heartbeat=scheduled_heartbeat,
+            gateway_review_admission=gateway_review_admission,
             voice_turn=str(getattr(message_type, "value", message_type) or "").lower() == "voice",
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
