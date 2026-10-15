@@ -591,6 +591,121 @@ def _rule_running_with_open_parents(task, events, runs, now, cfg) -> list[Diagno
     )]
 
 
+def _current_blocker_evidence(
+    task_id: str, events: list[Any], runs: list[Any],
+) -> Optional[tuple[str, str, Optional[int], int]]:
+    """Return the selected reason and event provenance, without changing history."""
+    if not isinstance(task_id, str) or not task_id or task_id.strip() != task_id:
+        return None
+    owned = []
+    for ev in events:
+        owner = _task_field(ev, "task_id")
+        if not isinstance(owner, str) or not owner or owner.strip() != owner:
+            return None
+        if owner == task_id:
+            owned.append(ev)
+    ids = [_task_field(ev, "id") for ev in owned]
+    if all(value is None for value in ids):
+        ordered = owned
+    elif all(type(value) is int and value > 0 for value in ids):
+        ordered = sorted(owned, key=lambda ev: _task_field(ev, "id"))
+    else:
+        return None
+    candidate = None
+    for ev in ordered:
+        reference = _task_field(ev, "run_id")
+        if reference is not None:
+            well_formed_runs = all(
+                type(_task_field(run, "id")) is int and _task_field(run, "id") > 0
+                for run in runs
+            )
+            matches = [run for run in runs if _task_field(run, "id") == reference]
+            if (type(reference) is not int or reference <= 0 or not well_formed_runs
+                    or len(matches) != 1 or _task_field(matches[0], "task_id") != task_id):
+                candidate = None
+                continue
+        kind = _task_field(ev, "kind")
+        if not isinstance(kind, str) or not kind.strip():
+            candidate = None
+            continue
+        if kind in {
+            "created", "claimed", "promoted", "promoted_manual", "unblocked", "reclaimed",
+            "completed", "archived", "scheduled", "review_requested", "changes_requested",
+            "review_reopened", "specified", "decomposed", "dependency_wait", "block_loop_detected",
+            "stale", "reconciled", "timed_out", "crashed", "spawn_failed", "rate_limited",
+            "protocol_violation", "status",
+        }:
+            candidate = None
+        elif kind in {"blocked", "gave_up"}:
+            payload = _task_field(ev, "payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (ValueError, TypeError):
+                    payload = None
+            if not isinstance(payload, dict):
+                candidate = None
+                continue
+            reason = payload.get("error" if kind == "gave_up" else "reason")
+            if (kind == "blocked" and payload.get("classified_in_place") is True
+                    and (reason is None or isinstance(reason, str) and not reason.strip())):
+                if candidate is None or candidate[1] != "gave_up":
+                    candidate = None
+                continue
+            timestamp = _task_field(ev, "created_at")
+            if type(timestamp) is not int or timestamp < 0:
+                timestamp = 0
+            candidate = (
+                (reason, kind, _task_field(ev, "id"), timestamp)
+                if isinstance(reason, str) and reason.strip() else None
+            )
+    return candidate
+
+
+def _safe_blocker_reason(reason: str) -> str:
+    """Redact complete selected text before any display shortening."""
+    import re
+    import unicodedata
+    from agent.redact import redact_sensitive_text
+
+    cleaned = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", reason)
+    cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", cleaned)
+    cleaned = "".join(
+        " " if char.isspace() else char
+        for char in cleaned
+        if char.isspace() or unicodedata.category(char) not in {"Cc", "Cf"}
+    )
+    redacted = redact_sensitive_text(cleaned, force=True, redact_url_credentials=True)
+    return " ".join(redacted.split())
+
+
+def _truncate_blocker_text(text: str, limit: int) -> str:
+    """Bound complete display text, including an ellipsis when needed."""
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _rule_current_blocker(task, events, runs, now, cfg) -> list[Diagnostic]:
+    if _task_field(task, "status") != "blocked":
+        return []
+    evidence = _current_blocker_evidence(_task_field(task, "id"), events, runs)
+    if evidence is None:
+        return []
+    reason, kind, event_id, timestamp = evidence
+    reason = _safe_blocker_reason(reason)
+    if not reason:
+        return []
+    return [Diagnostic(
+        kind="current_blocker", severity="warning",
+        title=_truncate_blocker_text("Blocked: " + reason, 180),
+        detail=_truncate_blocker_text(reason, 1000),
+        actions=[DiagnosticAction(
+            kind="comment", label="Review and discuss the blocker", suggested=True,
+        )],
+        first_seen_at=timestamp, last_seen_at=timestamp,
+        data={"source_event_kind": kind, "source_event_id": event_id},
+    )]
+
+
 def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Blocked for >= cfg["blocked_stale_hours"] (default 24) with no comment
     or unblock since the last ``blocked`` event."""
@@ -745,6 +860,7 @@ _RULES: list[RuleFn] = [
     _rule_repeated_crashes,
     _rule_review_dependency_deadlock,
     _rule_running_with_open_parents,
+    _rule_current_blocker,
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
