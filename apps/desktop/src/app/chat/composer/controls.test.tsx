@@ -6,6 +6,7 @@ import { I18nProvider } from '@/i18n'
 import { $hudMode } from '@/store/hud'
 import { applyWakeStartResult, applyWakeStatus, resetWakeWordState } from '@/store/wake-word'
 
+import { setBusyInputModeFromConfig } from './busy-input-mode'
 import { ComposerControls } from './controls'
 
 vi.mock('./model-pill', () => ({ ModelPill: () => null }))
@@ -59,6 +60,7 @@ async function expectShortcutTooltip(label: string, shortcut: string) {
 afterEach(() => {
   cleanup()
   $hudMode.set(false)
+  setBusyInputModeFromConfig('interrupt')
 })
 
 // The HUD is a Spotlight bar a few hundred pixels wide: the voice controls
@@ -142,6 +144,7 @@ describe('narrow tiles', () => {
 
 describe('ComposerControls shortcut tooltips', () => {
   it('labels busy Send with the effective configured action', async () => {
+    setBusyInputModeFromConfig('steer')
     renderControls({ busy: true, busyAction: 'steer' })
 
     await expectShortcutTooltip('Steer the current run', '↵')
@@ -150,7 +153,7 @@ describe('ComposerControls shortcut tooltips', () => {
   it('shows Stop only when the composer is empty mid-turn', async () => {
     renderControls({ busy: true, busyAction: 'stop', canSubmit: true, hasComposerPayload: false })
 
-    await expectShortcutTooltip('Stop', '↵')
+    await expectShortcutTooltip('Stop', 'Esc')
   })
 
   it('answers a waiting card with Send when the draft has text, and offers no Queue', () => {

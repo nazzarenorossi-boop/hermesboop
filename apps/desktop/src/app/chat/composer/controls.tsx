@@ -89,9 +89,15 @@ export function ComposerControls({
   const showStop = busy && !hasComposerPayload
 
   const showQueueButton = queueButtonVisible(busy, busyAction, hasComposerPayload, cardWaiting)
-
-  // A waiting card takes the draft as its answer through Send, whatever the busy action.
   const sendLabel = composerSendLabel(busy && !cardWaiting, busyAction, c)
+
+  const primaryKeybindAction = cardWaiting
+    ? 'composer.send'
+    : busyAction === 'queue'
+      ? 'composer.send' // Fallback Queue can be triggered by Enter even in Steer/Interrupt mode.
+      : busyAction === 'steer'
+        ? 'composer.steer'
+        : 'composer.send'
 
   // The HUD is a Spotlight bar a few hundred pixels wide, so the four separate
   // voice toggles fold into one menu there and leave the row to the input. A
@@ -158,9 +164,9 @@ export function ComposerControls({
         <Tip
           label={
             showStop ? (
-              <TipKeybindLabel actionId="composer.send" text={c.stop} />
+              <TipKeybindLabel actionId="composer.cancel" text={c.stop} />
             ) : (
-              <TipKeybindLabel actionId="composer.send" text={sendLabel} />
+              <TipKeybindLabel actionId={primaryKeybindAction} text={sendLabel} />
             )
           }
           placement="control"
