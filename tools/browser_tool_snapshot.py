@@ -15,6 +15,12 @@ _SCREENSHOT_PATH_PATTERNS = (
     r"(?P<path>/\S+?\.png)(?:\s|$)",
 )
 
+# Keep enough headroom below Python's recursion limit for redaction and its
+# dependencies. Browser output is page-controlled, so overly deep branches
+# must not make the tool call fail before the model boundary is protected.
+_BROWSER_OUTPUT_REDACTION_MAX_DEPTH = 100
+_BROWSER_OUTPUT_REDACTION_TRUNCATED = "[browser output nested too deeply; subtree omitted]"
+
 
 def _extract_screenshot_path_from_text(text: str) -> Optional[str]:
     """Extract a screenshot file path from agent-browser human-readable output."""
@@ -108,18 +114,27 @@ def _truncate_snapshot(snapshot_text: str, max_chars: Optional[int] = None) -> s
     return '\n'.join(result)
 
 
-def _redact_browser_output(value: Any) -> Any:
+def _redact_browser_output(value: Any, *, _depth: int = 0) -> Any:
     """Force-redact secrets in browser-originated data (snapshots, console, eval
     results can carry page-rendered keys/cookies/tokens). Tool output is a model
-    boundary, so this applies even when global log redaction is disabled."""
+    boundary, so this applies even when global log redaction is disabled.
+
+    Page-controlled containers are bounded so a deeply nested result cannot
+    exhaust Python's recursion budget. The omitted subtree is not returned.
+    """
     from agent.redact import redact_sensitive_text
 
+    if _depth >= _BROWSER_OUTPUT_REDACTION_MAX_DEPTH:
+        return _BROWSER_OUTPUT_REDACTION_TRUNCATED
     if isinstance(value, str):
         return redact_sensitive_text(value, force=True)
     if isinstance(value, list):
-        return [_redact_browser_output(item) for item in value]
+        return [_redact_browser_output(item, _depth=_depth + 1) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_browser_output(item) for item in value)
+        return tuple(_redact_browser_output(item, _depth=_depth + 1) for item in value)
     if isinstance(value, dict):
-        return {_redact_browser_output(key): _redact_browser_output(item) for key, item in value.items()}
+        return {
+            _redact_browser_output(key, _depth=_depth + 1): _redact_browser_output(item, _depth=_depth + 1)
+            for key, item in value.items()
+        }
     return value

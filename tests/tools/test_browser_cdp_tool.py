@@ -23,6 +23,22 @@ from tools import browser_tool_install as bt_install
 from tools import browser_tool_cdp as bt_cdp
 
 
+def test_overdeep_cdp_value_is_omitted_before_redaction_recurses():
+    """Regression for #137067: page-controlled CDP values stay model-safe."""
+    assert browser_cdp_tool._redact_cdp_output({"nested": ["plain value"]}) == {
+        "nested": ["plain value"]
+    }
+
+    value: object = "secret-token-AAAAAAAA"
+    for _ in range(1_200):
+        value = [value]
+
+    result = browser_cdp_tool._redact_cdp_output(value)
+    serialized = str(result)
+    assert browser_cdp_tool._CDP_OUTPUT_REDACTION_TRUNCATED in serialized
+    assert "secret-token-AAAAAAAA" not in serialized
+
+
 # ---------------------------------------------------------------------------
 # In-process CDP mock server
 # ---------------------------------------------------------------------------

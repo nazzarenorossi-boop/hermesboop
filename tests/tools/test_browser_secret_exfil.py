@@ -184,6 +184,26 @@ class TestBrowserSnapshotRedaction:
         assert "Dashboard" in content
         assert "ref=e5" in content
 
+    def test_overdeep_page_value_is_omitted_before_redaction_recurses(self):
+        """Regression for #137067: page values cannot exhaust the redaction walker."""
+        from tools.browser_tool_snapshot import (
+            _BROWSER_OUTPUT_REDACTION_TRUNCATED,
+            _redact_browser_output,
+        )
+
+        assert _redact_browser_output({"nested": ["plain value"]}) == {
+            "nested": ["plain value"]
+        }
+
+        value: object = "secret-token-AAAAAAAA"
+        for _ in range(1_200):
+            value = {"nested": value}
+
+        result = _redact_browser_output(value)
+        serialized = str(result)
+        assert _BROWSER_OUTPUT_REDACTION_TRUNCATED in serialized
+        assert "secret-token-AAAAAAAA" not in serialized
+
 
 
 
