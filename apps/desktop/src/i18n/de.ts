@@ -3824,6 +3824,8 @@ export const deOverrides = {
     ],
     startVoice: 'Sprachkonversation starten',
     openDirective: 'Öffnen',
+    previewMarkdown: 'Markdown-Vorschau',
+    editMarkdown: 'Markdown bearbeiten',
     queueMessage: 'Nachricht einreihen',
     steer: 'Laufenden Lauf steuern',
     redirect: 'Laufenden Lauf umleiten',
