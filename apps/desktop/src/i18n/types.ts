@@ -1,13 +1,15 @@
+import type { ErrorCodeKey } from '@/lib/error-surface'
+import type { TipId } from '@/lib/tips/catalog'
+
+import type { BillingRiskCopy } from './billing-risk-copy'
 // Desktop i18n type contract.
 //
 // `Translations` is the single source of truth for every translatable string
 // surface. Fully translated locale files may satisfy this interface directly;
 // partial locales should use `defineLocale()` so missing desktop-only strings
 // fall back to English while new keys remain type-checked.
-
-import type { ErrorCodeKey } from '@/lib/error-surface'
-import type { TipId } from '@/lib/tips/catalog'
-
+import type { PermissionModelCopy } from './permission-model-copy'
+import type { NotificationsTranslations } from './types-notifications'
 import type { AppTourTranslations } from './types_app_tour'
 import type { AuxTaskCopyMap } from './types_aux_tasks'
 import type { BillingTranslations } from './types_billing'
@@ -26,7 +28,7 @@ import type { UninstallSectionTranslations } from './types_uninstall_section'
 import type { UpdateChannelCopy } from './types_update_channel'
 
 /** The locales compiled into the app (`TRANSLATIONS`). */
-export type BundledLocale = 'en' | 'zh' | 'zh-hant' | 'ja' | 'ar' | 'ru' | 'fr' | 'de' | 'es'
+export type BundledLocale = 'en' | 'ko' | 'zh' | 'zh-hant' | 'ja' | 'ar' | 'ru' | 'fr' | 'de' | 'es'
 
 /** Any language id the app can render: a bundled locale, or one a plugin /
  *  the backend registered at runtime (`registerAppLocale`). Lowercase
@@ -394,7 +396,6 @@ export interface Translations extends NoticeTranslations {
     on: string
     off: string
   }
-
   fileMenu: {
     revealFinder: string
     revealExplorer: string
@@ -415,111 +416,9 @@ export interface Translations extends NoticeTranslations {
     revealMissing: string
     revealUnavailable: string
   }
-
   boot: BootTranslations
-
-  notifications: {
-    sharedProfileWarning: string
-    region: string
-    hide: string
-    show: string
-    more: (count: number) => string
-    clearAll: string
-    dismiss: string
-    details: string
-    copyDetail: string
-    compressDeferredDone: string
-    copyDetailFailed: string
-    backendOutOfDateTitle: string
-    backendOutOfDateMessage: string
-    desktopOutOfDateTitle: string
-    desktopOutOfDateMessage: string
-    updateDesktopApp: string
-    installMethodUnsupportedTitle: string
-    updateHermes: string
-    updateReadyTitle: string
-    updateReadyMessage: (count: number) => string
-    updateReadyMessageUnknown: string
-    updateReadyMessageAppInstaller: string
-    seeWhatsNew: string
-    mcp: {
-      needsAuthTitle: string
-      needsAuthMessage: (name: string) => string
-      errorTitle: string
-      errorMessage: (name: string) => string
-      signIn: string
-      view: string
-      disable: string
-      disabledMessage: (name: string) => string
-      disableFailed: (name: string) => string
-    }
-    errors: {
-      elevenLabsNeedsKey: string
-      elevenLabsRejectedKey: string
-      diskFull: string
-      storageFailure: string
-      gatewayAuthFailed: string
-      methodNotAllowed: string
-      microphonePermission: string
-      openaiRejectedApiKey: string
-      openaiTtsNeedsKey: string
-      codeSkewRestartRequired: string
-      rpcOutOfSync: string
-      restartHermesFailed: string
-    }
-    actions: {
-      restartHermes: string
-      openKeys: string
-      openGateways: string
-      openMaintenance: string
-    }
-    voice: {
-      configureSpeechToText: string
-      couldNotStartSession: string
-      microphoneAccessDenied: string
-      microphoneConstraintsUnsupported: string
-      microphoneFailed: string
-      microphoneInUse: string
-      microphonePermissionDenied: string
-      microphoneStartFailed: string
-      microphoneUnsupported: string
-      noMicrophone: string
-      noSpeechDetected: string
-      playbackFailed: string
-      recordingFailed: string
-      sayStopToEnd: (phrase: string) => string
-      transcriptionFailed: string
-      transcriptionUnavailable: string
-      tryRecordingAgain: string
-      unavailable: string
-      liveEnded: string
-      liveEndedConnectionLost: string
-      liveEndedClosed: string
-      liveError: string
-      liveDelegationFailed: string
-      liveUnavailable: (reason: string) => string
-    }
-    // Native OS notification copy (titles + generic fallback bodies). Dynamic
-    // bodies (the agent's reply, a command, an error) are passed through raw.
-    native: {
-      approvalTitle: string
-      approvalTitleNamed: (session: string) => string
-      approveAction: string
-      rejectAction: string
-      inputTitle: string
-      inputTitleNamed: (session: string) => string
-      inputBody: string
-      turnDoneTitle: string
-      turnDoneBody: string
-      turnErrorTitle: string
-      backgroundDoneTitle: string
-      backgroundFailedTitle: string
-      creditsTitle: string
-    }
-  }
-
+  notifications: NotificationsTranslations
   billingBlock: BillingTranslations['billingBlock']
-
   sendDiagnostics: {
     title: string
     privacyNotice: string
@@ -540,7 +439,6 @@ export interface Translations extends NoticeTranslations {
       portal: string
     }
   }
-
   titlebar: {
     hideSidebar: string
     showSidebar: string
@@ -560,7 +458,6 @@ export interface Translations extends NoticeTranslations {
     layoutEditor: string
     layoutEditorTitle: (modifier: string) => string
   }
-
   keybinds: {
     title: string
     subtitle: (open: string) => string
@@ -575,13 +472,10 @@ export interface Translations extends NoticeTranslations {
     categories: Record<string, string>
     actions: Record<string, string>
   }
-
-  // Find-in-page bar (⌘F). `close` reuses common.close.
   findInPage: {
     next: string
     previous: string
   }
-
   language: {
     label: string
     description: string
@@ -591,7 +485,6 @@ export interface Translations extends NoticeTranslations {
     searchPlaceholder: string
     noResults: string
   }
-
   settings: {
     subpages: Record<string, string>
     closeSettings: string
@@ -686,7 +579,12 @@ export interface Translations extends NoticeTranslations {
         installUncertain: string
         desktopFailed: string
         missingEnv: (name: string, vars: string) => string
+        restartToApply: string
+        restartNow: string
       }
+      sourceTooLarge: string
+      sourcePreviewTruncated: string
+      loadFailed: (name: string) => string
     }
     vault: {
       title: string
@@ -924,7 +822,12 @@ export interface Translations extends NoticeTranslations {
         noneAvailable: string
         turnOnFailed: string
         turnOffFailed: string
+        on: string
+        off: string
       }
+      themeDescriptions: Record<string, string>
+      themeMarketplace: string
+      noInstalledThemes: (query: string) => string
     }
     fieldLabels: Record<string, string>
     fieldDescriptions: Record<string, string>
@@ -975,7 +878,41 @@ export interface Translations extends NoticeTranslations {
       screenRecording: string
       driverHealth: string
     }
-    about: { updates: string; channel: UpdateChannelCopy }
+    about: {
+      updates: string
+      heading: string
+      version: (value: string) => string
+      versionUnavailable: string
+      bundleOutOfSync: string
+      bundleOutOfSyncDesc: string
+      bundleOutOfSyncAction: string
+      bundleSwapPending: string
+      bundleSwapPendingDesc: string
+      bundleSwapPendingAction: string
+      checkNow: string
+      checking: string
+      seeWhatsNew: string
+      updateNow: string
+      releaseNotes: string
+      onLatest: string
+      installing: string
+      cantUpdate: string
+      cantReach: string
+      tapCheck: string
+      updateReady: (count: number) => string
+      updateReadyUnknown: string
+      lastChecked: (age: string) => string
+      justNowSuffix: string
+      automaticUpdates: string
+      automaticUpdatesDesc: string
+      branchCommit: (branch: string, commit: string) => string
+      never: string
+      justNow: string
+      minAgo: (count: number) => string
+      hoursAgo: (count: number) => string
+      daysAgo: (count: number) => string
+      channel: UpdateChannelCopy
+    }
     config: {
       minimizeToTrayTitle: string
       minimizeToTrayDesc: string
@@ -1070,7 +1007,6 @@ export interface Translations extends NoticeTranslations {
       set: string
       clear: string
     }
-    // v2 multi-connection registry: Settings → Connections.
     connections: {
       title: string
       intro: string
@@ -1145,6 +1081,7 @@ export interface Translations extends NoticeTranslations {
       receiptVersions: (pre: string, post: string) => string
       scopesRestored: (profiles: string) => string
       scopeNotRestored: (profile: string, error: string) => string
+      receiptOutcomes: { success: string; failed: string; partial: string; running: string; refused: string }
     }
     gateway: {
       loading: string
@@ -1174,7 +1111,11 @@ export interface Translations extends NoticeTranslations {
       cloudOrgChange: string
       cloudOrgRole: (role: string) => string
       cloudLoadingAgents: string
-      cloudNoAgents: { before: string; linkText: string; after: string }
+      cloudNoAgents: {
+        before: string
+        linkText: string
+        after: string
+      }
       cloudRefresh: string
       cloudConnect: string
       cloudSavedTitle: string
@@ -1331,6 +1272,50 @@ export interface Translations extends NoticeTranslations {
       deepLinkErrorShape: string
       deepLinkErrorUrl: string
       deepLinkErrorTooLarge: string
+      failedLoad: string
+      nameRequiredTitle: string
+      nameRequiredMessage: string
+      objectRequired: string
+      gatewayUnavailableTitle: string
+      gatewayUnavailableMessage: string
+      reloadedTitle: string
+      reloadedMessage: string
+      newServer: string
+      reload: string
+      reloading: string
+      emptyTitle: string
+      emptyDesc: string
+      editServer: string
+      saveServer: string
+      testing: string
+      testOk: (count: number) => string
+      testFailed: string
+      enableServer: (name: string) => string
+      disableServer: (name: string) => string
+      serverEnabled: (name: string) => string
+      serverDisabled: (name: string) => string
+      toggleFailed: (name: string, enabled: boolean) => string
+      tabServers: string
+      tabCatalog: string
+      catalogLoadFailed: string
+      catalogEmpty: string
+      catalogInstalled: string
+      catalogEnabled: string
+      catalogNeedsInstall: string
+      catalogInstall: string
+      catalogInstalling: string
+      catalogInstallStarted: (name: string) => string
+      catalogEnvPrompt: (name: string) => string
+      unusedPill: string
+      waitingForBrowser: string
+      unsavedConnect: string
+      enableTool: (tool: string) => string
+      disableTool: (tool: string) => string
+      importButton: string
+      importPlaceholder: string
+      importNoMatch: string
+      importConfirm: string
+      importConfirmMany: (count: number) => string
     }
     model: {
       setupProviderFallback: string
@@ -1409,8 +1394,6 @@ export interface Translations extends NoticeTranslations {
       unifiedMemory: string
       modelsTitle: string
       recommended: string
-      /** Recommended-badge tooltip by resolver branch; unknown keys (newer
-       *  backend) simply show no tooltip. */
       recommendedReason: Record<string, string>
       noRecommendationTitle: string
       noRecommendationDetail: string
@@ -1421,8 +1404,6 @@ export interface Translations extends NoticeTranslations {
       downloadStatusRunning: string
       downloadSpeed: (rate: string) => string
       downloadEta: (time: string) => string
-      /** Duration units the ETA is composed from; hours carries its
-       *  remainder so a locale orders the two parts itself. */
       downloadEtaSeconds: (count: number) => string
       downloadEtaMinutes: (count: number) => string
       downloadEtaHours: (hours: number, minutes: number) => string
@@ -1505,6 +1486,7 @@ export interface Translations extends NoticeTranslations {
       deleteConfirm: (model: string) => string
       deleted: (model: string) => string
       deleteFailed: string
+      updateToast: (next: string) => string
     }
     billing: {
       perMonth: (amount: string) => string
@@ -1883,6 +1865,7 @@ export interface Translations extends NoticeTranslations {
         }
       }
     }
+    envDescriptions?: Record<string, string>
   }
 
   skillDeepLink: {
@@ -2080,8 +2063,12 @@ export interface Translations extends NoticeTranslations {
       scanFailed: string
       searchFailed: string
     }
+    toolsetLabels: Record<string, string>
+    tabMcp: string
+    toolsetDescriptions?: Record<string, string>
+    skillDescriptions?: Record<string, string>
+    skillCategoryNames?: Record<string, string>
   }
-
   starmap: {
     title: string
     subtitle: (nodes: number, clusters: number) => string
@@ -2150,7 +2137,6 @@ export interface Translations extends NoticeTranslations {
     durationMinutes: (minutes: number, seconds: number) => string
     tokens: (value: number | string) => string
   }
-
   commandCenter: {
     close: string
     paletteTitle: string
@@ -2327,8 +2313,8 @@ export interface Translations extends NoticeTranslations {
       running: string
       viewLog: string
     }
+    sectionDescriptions: Record<'maintenance' | 'sessions' | 'system' | 'usage', string>
   }
-
   messaging: {
     search: string
     statusFilter: Record<'all' | 'bad' | 'good' | 'muted' | 'warn', string>
@@ -2429,7 +2415,6 @@ export interface Translations extends NoticeTranslations {
     fieldCopy: Record<string, { label?: string; help?: string; placeholder?: string }>
     platformIntro: Record<string, string>
   }
-
   webhooks: {
     search: string
     loading: string
@@ -2487,7 +2472,6 @@ export interface Translations extends NoticeTranslations {
     copy: string
     deliverOptions: Record<string, string>
   }
-
   profiles: {
     close: string
     nameHint: string
@@ -2496,8 +2480,6 @@ export interface Translations extends NoticeTranslations {
     search: string
     loading: string
     newProfile: string
-    /** Verb + noun: the profiles-list button and the native file-dialog titles,
-     *  which stand alone. Per-profile menus use the bare `exportMenu`. */
     importProfile: string
     exportProfile: string
     exportMenu: string
@@ -2519,7 +2501,6 @@ export interface Translations extends NoticeTranslations {
       onGateway: (name: string, gateway: string) => string
       switchTo: (name: string, gateway: string) => string
       deleteOn: (gateway: string) => string
-      /** At-rest local default pill: device, not Home, and the click's consequence. */
       localDevice: string
       switchDeviceTitle: string
       switchDeviceDesc: string
@@ -2637,7 +2618,6 @@ export interface Translations extends NoticeTranslations {
     failedCreate: string
     failedRename: string
   }
-
   modelAssignment: {
     saveFailed: string
     confirmTitle: string
@@ -2645,7 +2625,6 @@ export interface Translations extends NoticeTranslations {
     confirmAction: string
     declined: string
   }
-
   cron: {
     close: string
     title: string
@@ -2746,8 +2725,18 @@ export interface Translations extends NoticeTranslations {
       emptyTitle: string
       emptyDesc: string
     }
+    modelImpact: {
+      title: string
+      message: (count: number) => string
+      detailMore: (names: string, remaining: number) => string
+      review: string
+      saveFailed: string
+      confirmTitle: string
+      confirmDetail: string
+      confirmAction: string
+      declined: string
+    }
   }
-
   artifacts: {
     search: string
     refresh: string
@@ -2782,14 +2771,12 @@ export interface Translations extends NoticeTranslations {
     copyUrl: string
     copyPath: string
   }
-
   artifactCard: {
     kind: Record<'code' | 'html' | 'svg', string>
     generating: (lines: number) => string
     versionBadge: (count: number) => string
     open: string
   }
-
   artifactPreview: {
     versionOf: (current: number, total: number) => string
     olderVersion: string
@@ -2802,7 +2789,6 @@ export interface Translations extends NoticeTranslations {
     missingTitle: string
     missingBody: string
   }
-
   sidebar: {
     filter: {
       grouping: string
@@ -2945,7 +2931,6 @@ export interface Translations extends NoticeTranslations {
     }
     markAllRead: string
   }
-
   composer: {
     message: string
     wakingProfile: (profile: string) => string
@@ -3099,7 +3084,6 @@ export interface Translations extends NoticeTranslations {
       doneTip: string
     }
   }
-
   statusStack: {
     hideStack: string
     showStack: string
@@ -3253,7 +3237,6 @@ export interface Translations extends NoticeTranslations {
       worktrees: string
     }
   }
-
   updates: {
     discontinuedTitle: string
     discontinuedBody: string
@@ -3290,8 +3273,6 @@ export interface Translations extends NoticeTranslations {
     manualBodyBackend: string
     manualPickedUp: string
     manualPickedUpBackend: string
-    /** GUI/backend skew (#45205): backend updated but the running desktop app
-     *  package (AppImage/.deb/.rpm) was not changed and must be reinstalled. */
     guiSkewTitle: string
     guiSkewBody: string
     copy: string
@@ -3318,8 +3299,6 @@ export interface Translations extends NoticeTranslations {
     pidLabel: (pid: number) => string
     technicalDetails: string
     notNow: string
-    /** Multi-target update flow: client nudge after a backend update, and
-     *  per-row fan-out outcomes when updating every registered instance. */
     clientAlsoBehindTitle: string
     clientAlsoBehindMessage: string
     clientAlsoBehindAction: string
@@ -3462,11 +3441,8 @@ export interface Translations extends NoticeTranslations {
   onboarding: OnboardingTranslations
 
   freeTier: {
-    /** Settings › Providers row title while the Nous identity is the free tier. */
     providerRowTitle: string
-    /** The featured row's pitch while the identity is the free tier: what signing in adds. */
     providerRowPitch: string
-    // First-launch introduction (ready screen + composer strip).
     readyTitle: string
     readyCaption: string
     begin: string
@@ -3476,11 +3452,8 @@ export interface Translations extends NoticeTranslations {
     stripBody: string
     openModelPicker: string
     dismiss: string
-    // Statusbar chip.
-    /** The status-bar chip's label: the provider name alone; the model id and the sign-in follow it. */
     providerName: string
     statusLabel: (model: string) => string
-    // Sign-in dialog.
     signIn: string
     signInHeading: string
     settingUp: string
@@ -3506,10 +3479,8 @@ export interface Translations extends NoticeTranslations {
     timedOutBody: string
     retiredBody: string
     errorBody: string
-    /** The account service asked for a short wait mid sign-in (a busy account, a rate limit, the ops pause). */
     busyHeading: string
     busyBody: (wait: string) => string
-    /** The account service could not be reached or errored mid sign-in. */
     unreachableBody: string
     alreadySignedInHeading: string
     alreadySignedInBody: string
@@ -3538,7 +3509,6 @@ export interface Translations extends NoticeTranslations {
       retrying: string
     }
   }
-
   modelPicker: {
     title: string
     current: string
@@ -3561,7 +3531,6 @@ export interface Translations extends NoticeTranslations {
     addCustomModelAction: string
     customModelPlaceholder: string
   }
-
   modelVisibility: {
     title: string
     search: string
@@ -3574,7 +3543,6 @@ export interface Translations extends NoticeTranslations {
     resetDescription: string
     resetAction: string
   }
-
   shell: {
     windowControls: string
     paneControls: string
@@ -3595,7 +3563,6 @@ export interface Translations extends NoticeTranslations {
       xhigh: string
       max: string
       ultra: string
-      /** The CLI's `/reasoning` clamp note, e.g. "sends Max on this route". */
       sendsOnRoute: (level: string) => string
       updateFailed: string
       fastFailed: string
@@ -3730,9 +3697,9 @@ export interface Translations extends NoticeTranslations {
       modelPinned: string
       modelTitle: (provider: string, model: string) => string
       providerModelTitle: (provider: string, model: string) => string
+      session: string
     }
   }
-
   rightSidebar: {
     aria: string
     panelsAria: string
@@ -3779,7 +3746,6 @@ export interface Translations extends NoticeTranslations {
     terminalCloseAll: string
     addToChat: string
   }
-
   preview: {
     tab: string
     pin: string
@@ -3892,7 +3858,6 @@ export interface Translations extends NoticeTranslations {
       cancelComment: string
     }
   }
-
   interfaceMode: {
     title: string
     hint: string
@@ -3900,7 +3865,6 @@ export interface Translations extends NoticeTranslations {
     simple: { label: string; description: string }
     advanced: { label: string; description: string }
   }
-
   zones: {
     showTabStrip: string
     hideTabStrip: string
@@ -3949,7 +3913,6 @@ export interface Translations extends NoticeTranslations {
     zoneCount: (count: number) => string
     tabCount: (count: number) => string
   }
-
   contextMenu: {
     link: {
       openInApp: string
@@ -3973,7 +3936,6 @@ export interface Translations extends NoticeTranslations {
       inspectElement: string
     }
   }
-
   assistant: {
     thread: {
       loadingSession: string
@@ -4009,8 +3971,6 @@ export interface Translations extends NoticeTranslations {
         runtime: string
         streaming: string
       }
-      /** One plain sentence per layer — what happened and what to do — shown
-       *  when the failure code has no dedicated entry in `errorCodes`. */
       errorLayerBodies: {
         auth: string
         billing: string
@@ -4022,27 +3982,16 @@ export interface Translations extends NoticeTranslations {
         runtime: string
         streaming: string
       }
-      /** Per failure code (agent/error_classifier.py FailoverReason values plus
-       *  the gateway's site codes): a title and one plain sentence saying what
-       *  happened and what to do. Function entries take the provider label. */
       errorCodes: Record<ErrorCodeKey, ErrorCardCopy>
-      /** Auth layer, keyed on how the provider is credentialed. The OAuth
-       *  body is `errorOauthExpired` (already translated per locale). */
       errorAuthKinds: { api_key: ErrorCardCopy; oauth: Pick<ErrorCardCopy, 'title'> }
-      /** Collapsed "Details" line holding the raw provider/gateway text. */
       errorDetails: string
-      /** Stands in for the provider name when the descriptor carries none. */
       errorGenericProvider: string
-      /** Global toast title for a mid-turn gateway `error` event. */
       errorToastTitle: string
       errorRetry: string
       errorLimitResets: (time: string) => string
-      /** Arms ONE client-side retry of this turn at the 429's `resets_at` (#98852). */
       errorRetryAtReset: (time: string) => string
-      /** Countdown shown while that retry is armed; `wait` is "12m 03s". */
       errorRetryScheduled: (time: string, wait: string) => string
       errorRetryScheduledCancel: string
-      /** Escape hatch when Retry would only reproduce SESSION_NOT_OWNED (#106217). */
       errorStartNewSession: string
       errorSwitchProvider: string
       errorChooseModel: string
@@ -4051,13 +4000,8 @@ export interface Translations extends NoticeTranslations {
       errorOpenHermesFolder: string
       errorOpenHermesFolderFailed: string
       errorUpdateApiKey: string
-      /** One-click recovery for an expired/revoked OAuth grant: re-runs that
-       *  provider's sign-in flow (auth layer, authKind 'oauth'). */
       errorSignInAgain: (provider: string) => string
-      /** Free-tier refusals: opens the free sign-in dialog (signing in is free and lifts the refusal). */
       errorSignInFreeTier: string
-      /** Explains WHY the turn failed for an OAuth 401 — the raw body
-       *  ("HTTP 401: User not found.") doesn't say "sign in again". */
       errorOauthExpired: (provider: string) => string
       errorOpenLogs: string
       errorOpenLogsFailed: string
@@ -4124,6 +4068,11 @@ export interface Translations extends NoticeTranslations {
       sendFailed: string
       reloadFailed: string
       gatewayDisconnected: string
+      decline: string
+      declined: string
+      unanswered: string
+      notInCatalog: (server: string) => string
+      catalogSource: string
     }
     tool: {
       copyCode: string
@@ -4160,7 +4109,6 @@ export interface Translations extends NoticeTranslations {
       statusError: string
       statusRecovered: string
       statusDone: string
-      /** Over-budget / rejected memory write title — not "Saved to memory". */
       resultUnavailable: string
       resultInterrupted: string
       memoryWriteNoted: string
@@ -4192,7 +4140,6 @@ export interface Translations extends NoticeTranslations {
       titles: Record<ToolTitleKey, ToolTitleCopy>
     }
   }
-
   prompts: {
     gatewayDisconnected: string
     reconnect: string
@@ -4229,7 +4176,6 @@ export interface Translations extends NoticeTranslations {
     vaultUnlockKeepLocked: string
     vaultUnlockConfirm: string
   }
-
   desktop: {
     audioReadFailed: string
     sessionUnavailable: string
@@ -4322,17 +4268,12 @@ export interface Translations extends NoticeTranslations {
       startMessaging: string
     }
   }
-
   tips: {
     close: string
-    /** Keyed by `TipId`, so a new tip without copy is a type error. Plus the
-     *  campaign tips, which live outside the rotation's catalog: they carry
-     *  a button, and `action` is its label. */
     items: Record<TipId, { title: string; text: string }> & {
       'local-runtime-update': { title: string; text: string; action: string }
     }
   }
-
   errors: {
     genericFailure: string
     boundaryTitle: string
@@ -4342,7 +4283,6 @@ export interface Translations extends NoticeTranslations {
     reloadWindow: string
     openLogs: string
   }
-
   ui: {
     search: {
       clear: string
@@ -4365,4 +4305,6 @@ export interface Translations extends NoticeTranslations {
       toggle: (open: boolean) => string
     }
   }
+  billingRisk: BillingRiskCopy
+  permissionModel: PermissionModelCopy
 }
