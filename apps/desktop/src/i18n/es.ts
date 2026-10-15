@@ -4582,6 +4582,7 @@ export const esOverrides = {
       ultrafast: 'Ultrafast',
       useStandardSpeed: 'Usar velocidad estándar',
       effort: 'Esfuerzo',
+      auto: 'Auto',
       minimal: 'Mínimo',
       low: 'Bajo',
       medium: 'Medio',
