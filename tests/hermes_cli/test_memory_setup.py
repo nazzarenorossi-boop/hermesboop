@@ -122,3 +122,31 @@ def test_cmd_status_memory_tool_gate_enabled(capsys, monkeypatch):
     assert re.search(r"Memory tool:\s+enabled", captured)
     assert re.search(r"Memory injection:\s+enabled", captured)
     assert re.search(r"User profile:\s+disabled", captured)
+
+
+def test_schema_prompt_accepting_structured_defaults_keeps_their_type(monkeypatch):
+    schema = [
+        {"key": "sync_roles", "default": ["user"]},
+        {"key": "reflect", "default": {"disabled_for_cron": True, "max_calls_per_session": 3}},
+        {"key": "mode", "default": "auto"},
+    ]
+    monkeypatch.setattr(memory_setup, "_prompt", lambda label, default=None, secret=False: default or "")
+    config = {}
+
+    assert memory_setup._prompt_schema_fields("mnemosyne", schema, config, {})
+
+    assert config == {field["key"]: field["default"] for field in schema}
+
+
+def test_schema_prompt_edited_structured_fields_parse_or_are_rejected(monkeypatch):
+    schema = [
+        {"key": "sync_roles", "default": ["user", "assistant"]},
+        {"key": "bad_roles", "default": ["user"]},
+    ]
+    answers = {"sync_roles": "[]", "bad_roles": "user,assistant"}
+    monkeypatch.setattr(memory_setup, "_prompt", lambda label, default=None, secret=False: answers[label])
+    config = {"bad_roles": ["assistant"]}
+
+    assert memory_setup._prompt_schema_fields("mnemosyne", schema, config, {})
+
+    assert config == {"sync_roles": [], "bad_roles": ["assistant"]}

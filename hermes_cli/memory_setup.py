@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import shlex
 from pathlib import Path
+
+import yaml
 
 from hermes_constants import get_hermes_home
 from hermes_cli.secret_prompt import masked_secret_prompt
@@ -246,13 +249,50 @@ def _prompt_schema_fields(name: str, schema: list, provider_config: dict, env_wr
             if val and env_var:
                 env_writes[env_var] = val
         else:
-            effective_default = provider_config.get(key) or default
-            val = _prompt(desc, default=str(effective_default) if effective_default else None)
-            if val:
-                provider_config[key] = val
-                if env_var and env_var not in env_writes:
-                    env_writes[env_var] = val
+            saved = provider_config.get(key)
+            effective_default = default if saved is None or saved == "" else saved
+            shown = _format_field_default(effective_default)
+            raw = _prompt(desc, default=shown)
+            if not raw:
+                continue
+            try:
+                provider_config[key] = _coerce_field_answer(raw, shown, effective_default)
+            except ValueError:
+                kind = "list" if isinstance(effective_default, list) else "mapping"
+                print(f"  Ignoring {key}: expected a {kind} such as {shown}")
+                continue
+            if env_var and env_var not in env_writes:
+                env_writes[env_var] = raw
     return True
+
+
+def _format_field_default(value) -> str | None:
+    """Render a schema default for the prompt; structured values as JSON so edits parse back."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _coerce_field_answer(raw: str, shown: str | None, current):
+    """Map a prompt answer back to the field's type.
+
+    Accepting the offered default keeps its native value (a provider reading
+    ``sync_roles: "['user']"`` sees no roles at all). An edited list/dict field
+    must parse to the same shape, otherwise ``ValueError``.
+    """
+    if shown is not None and raw == shown and not isinstance(current, str):
+        return current
+    if isinstance(current, (list, dict)):
+        try:
+            parsed = yaml.safe_load(raw)
+        except yaml.YAMLError as exc:
+            raise ValueError(raw) from exc
+        if not isinstance(parsed, type(current)):
+            raise ValueError(raw)
+        return parsed
+    return raw
 
 
 def cmd_setup(args) -> None:
