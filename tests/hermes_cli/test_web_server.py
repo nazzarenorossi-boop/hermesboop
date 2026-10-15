@@ -2086,6 +2086,61 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             {"id": "gpt-5.6-sol-high", "canonical_model": "gpt-5.6-sol", "reasoning_effort": "high"},
         ]
 
+    def test_custom_endpoint_validate_reuses_the_saved_endpoint_key(self, monkeypatch):
+        """Refreshing an existing endpoint's model list must authenticate without exposing its key (#137292)."""
+        import contextlib
+
+        from hermes_cli.web_routers import config_env
+
+        self.client.post("/api/providers/custom-endpoints", json={
+            "id": "saved-proxy",
+            "name": "Saved proxy",
+            "base_url": "https://proxy.example.com/v1",
+            "model": "old-model",
+            "api_key": "saved-secret",
+        })
+        captured_headers = []
+
+        class FakeResp:
+            status_code = 200
+            is_success = True
+
+            def json(self):
+                return {"data": [{"id": "new-model"}]}
+
+        class FakeClient:
+            async def get(self, url, headers=None):
+                captured_headers.append(headers)
+                return FakeResp()
+
+            async def post(self, url, json=None, headers=None):
+                return FakeResp()
+
+        @contextlib.asynccontextmanager
+        async def fake_probe_client(url, timeout):
+            yield FakeClient()
+
+        monkeypatch.setattr(config_env, "_endpoint_probe_client", fake_probe_client)
+        body = self.client.post("/api/providers/custom-endpoints/validate", json={
+            "id": "saved-proxy",
+            "name": "Saved proxy",
+            "base_url": "https://proxy.example.com/v1",
+            "model": "old-model",
+        }).json()
+
+        assert body["ok"] is True
+        assert body["models"] == ["new-model"]
+        assert captured_headers[-1]["Authorization"] == "Bearer saved-secret"
+
+        self.client.post("/api/providers/custom-endpoints/validate", json={
+            "id": "saved-proxy",
+            "name": "Saved proxy",
+            "base_url": "https://other.example.com/v1",
+            "model": "old-model",
+        })
+
+        assert "Authorization" not in captured_headers[-1]
+
     @staticmethod
     def _responses_only_host(monkeypatch, posted):
         """A gateway that lists models on GET /models and serves POST /responses but 404s

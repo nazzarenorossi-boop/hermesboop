@@ -849,16 +849,34 @@ def delete_custom_endpoint(endpoint_id: str, profile: Optional[str] = None):
         return response
 
 
+def _saved_custom_endpoint_api_key(endpoint_id: str, base_url: str, profile: Optional[str]) -> str:
+    """Return a saved endpoint key only when its URL still matches the probe target."""
+    with _config_profile_scope(profile):
+        _stored_key, entry = _resolve_custom_endpoint_entry(load_config().get("providers"), endpoint_id)
+        if not isinstance(entry, dict):
+            return ""
+        stored_base_url = str(entry.get("base_url") or entry.get("api") or "").strip().rstrip("/")
+        if stored_base_url != base_url:
+            return ""
+        key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
+        if key_env:
+            return str(load_env().get(key_env) or "").strip()
+        return str(entry.get("api_key") or "").strip()
+
+
 @router.post("/api/providers/custom-endpoints/validate")
-async def validate_custom_endpoint(body: CustomEndpointUpdate):
+async def validate_custom_endpoint(body: CustomEndpointUpdate, profile: Optional[str] = None):
     """Probe a custom endpoint by calling its OpenAI-compatible /models URL."""
     base_url = (body.base_url or "").strip().rstrip("/")
     if not base_url:
         return {"ok": False, "reachable": True, "message": "Enter an endpoint URL first.", "models": []}
 
     headers = {"Accept": "application/json"}
-    if body.api_key and body.api_key.strip():
-        headers["Authorization"] = f"Bearer {body.api_key.strip()}"
+    api_key = (body.api_key or "").strip()
+    if not api_key and body.id:
+        api_key = _saved_custom_endpoint_api_key(body.id, base_url, profile)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     resolved, resp = await _probe_openai_compatible_models(base_url, headers)
     if resp is None:
