@@ -8,6 +8,7 @@ import {
   baseName,
   excludeProjectSessions,
   kanbanWorktreeDir,
+  laneGlyph,
   laneSwitchTarget,
   liveSessionProjectId,
   mergeRepoWorktreeGroups,
@@ -1476,5 +1477,21 @@ describe('project filter row rule (#97762)', () => {
     expect(sessionMatchesProjectFilter(sibling, ['p_app'], explicit, owners)).toBe(true)
     expect(sessionBucketId(sibling, explicit, owners)).toBe('p_app')
     expect(sessionProjectColor(sibling, explicit, owners)).toBe('#abc')
+  })
+})
+
+describe('laneGlyph', () => {
+  it('marks git branch lanes with the branch glyph', () => {
+    expect(laneGlyph({})).toBe('git-branch')
+    expect(laneGlyph({ isGit: true })).toBe('git-branch')
+  })
+
+  it('marks a non-git folder lane with a folder glyph, not a branch', () => {
+    expect(laneGlyph({ isGit: false })).toBe('folder')
+  })
+
+  it('keeps home and kanban glyphs ahead of the git check', () => {
+    expect(laneGlyph({ isGit: false, isHome: true })).toBe('home')
+    expect(laneGlyph({ isGit: false, isKanban: true })).toBe('checklist')
   })
 })
