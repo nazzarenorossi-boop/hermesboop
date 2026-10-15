@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
+import { useHermesConfigRecord } from '@/app/hooks/use-config-record'
 import { searchSessions, type SessionSearchResult } from '@/hermes'
+import { configuredExcludeSources } from '@/lib/session-source'
 import { ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
 
 const SEARCH_DEBOUNCE_MS = 200
@@ -20,6 +22,11 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
   const [serverMatches, setServerMatches] = useState<SessionSearchResult[]>([])
   const [searchPending, setSearchPending] = useState(false)
   const profile = profileScope === ALL_PROFILES ? null : normalizeProfileKey(profileScope)
+  // The same exclusions the recents slice uses, so a term that lives inside an
+  // excluded source cannot resurface a row the list itself hides
+  // (`sessions.exclude_sources`, `a2a` by default).
+  const { data: configRecord } = useHermesConfigRecord()
+  const excludeSources = useMemo(() => configuredExcludeSources(configRecord), [configRecord])
 
   useEffect(() => {
     if (!query) {
@@ -34,7 +41,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
     setSearchPending(true)
 
     const id = window.setTimeout(() => {
-      void searchSessions(query, profile)
+      void searchSessions(query, profile, excludeSources)
         .then(res => {
           if (!cancelled) {
             setServerMatches(res.results)
@@ -52,7 +59,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
       cancelled = true
       window.clearTimeout(id)
     }
-  }, [query, profile])
+  }, [query, profile, excludeSources])
 
   return { searchPending, serverMatches }
 }

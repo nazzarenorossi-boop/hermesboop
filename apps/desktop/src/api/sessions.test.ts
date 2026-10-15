@@ -352,3 +352,27 @@ describe('searchSessions profile scope', () => {
     })
   })
 })
+
+// Search must honor the same source exclusions the sidebar recents slice uses
+// (`sessions.exclude_sources`): the backend has always accepted
+// `exclude_sources`, but search sent only `q`, so a term that lives inside an
+// A2A dispatch would surface a row the sidebar itself hides.
+describe('searchSessions source exclusions', () => {
+  it('sends only the query when no exclusions are configured', async () => {
+    hermesApi.mockResolvedValue({ results: [] } as never)
+
+    await searchSessions('baozun')
+
+    expect(hermesApi.mock.calls[0][0]).toMatchObject({ path: '/api/sessions/search?q=baozun' })
+  })
+
+  it('passes the configured exclusions so a hidden row stays hidden in search', async () => {
+    hermesApi.mockResolvedValue({ results: [] } as never)
+
+    await searchSessions('baozun', undefined, ['a2a', 'cron'])
+
+    expect((hermesApi.mock.calls[0][0] as { path: string }).path).toBe(
+      '/api/sessions/search?q=baozun&exclude_sources=a2a%2Ccron'
+    )
+  })
+})

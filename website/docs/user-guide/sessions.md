@@ -142,6 +142,15 @@ Each session is tagged with its source platform:
 
 A session compressed mid-conversation continues under the same source: the compression child of a `--source tool` or `oneshot` run is tagged the same way, so it inherits the same picker visibility.
 
+The Desktop sidebar's recents slice and its session search hide the internal sources above (`cron`, `kanban`, `tool`, `oneshot`, subagent runs, and the messaging platforms). `sessions.exclude_sources` adds to that built-in list — the built-ins are always kept, so the key only ever hides more:
+
+```yaml
+sessions:
+  exclude_sources: [a2a]   # merged with the built-in exclusions
+```
+
+Inbound A2A tasks (`a2a`) are excluded by default: work a peer dispatches to this agent should not land in the sidebar as one of your own conversations. Set `exclude_sources: []` to show them again.
+
 ## CLI Session Resume
 
 Resume previous conversations from the CLI using `--continue` or `--resume`:
