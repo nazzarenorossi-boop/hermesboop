@@ -315,3 +315,25 @@ def test_startup_recovery_backs_off_after_a_failed_install(tmp_path, monkeypatch
     monkeypatch.setattr(mig, "_attempted", set())
     mig.recover_at_startup("hindsight")
     assert attempts == ["hindsight", "hindsight"]
+
+
+def test_startup_recovery_names_enable_command_for_an_installed_disabled_provider(tmp_path, monkeypatch):
+    """Regression for #137017: a disabled catalog provider must not be reported as absent."""
+    from pm import install as pm_install
+
+    provider = tmp_path / "plugins" / "holographic"
+    provider.mkdir(parents=True)
+    (provider / "__init__.py").write_text("from agent.memory_provider import MemoryProvider\n", encoding="utf-8")
+    (provider / "plugin.yaml").write_text("name: hermes-memory-store\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "memory:\n  provider: holographic\nplugins:\n  disabled: [hermes-memory-store]\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(mig, "_attempted", set())
+    monkeypatch.setattr(pm_install, "lazy_installs_allowed", lambda: pytest.fail("must not try an install"))
+    said: list[str] = []
+
+    assert mig.recover_at_startup("holographic", say=said.append) is False
+    assert "is installed but disabled" in said[0]
+    assert "`hermes plugins enable holographic`" in said[0]
+    assert not mig._failure_stamp(tmp_path, "holographic").exists()

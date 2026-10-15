@@ -100,6 +100,18 @@ def provider_present(name: str, home: Path) -> bool:
         reset_hermes_home_override(token)
 
 
+def provider_disabled(name: str, home: Path) -> bool:
+    """True when an installed provider is explicitly disabled for *home*."""
+    from plugins.memory import _explicitly_disabled, find_provider_dir
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(home)
+    try:
+        provider_dir = find_provider_dir(name)
+        return provider_dir is not None and _explicitly_disabled(name, provider_dir)
+    finally:
+        reset_hermes_home_override(token)
+
+
 def catalog_source(name: str) -> Optional[str]:
     """The catalog entry that ships provider *name*, or None when the catalog has no such plugin."""
     from hermes_cli.plugin_catalog import get_live_catalog_entry
@@ -150,6 +162,15 @@ def _install_command(name: str, home: Path) -> str:
     if profile is None or (profile == "default" and get_active_profile() == "default"):
         return f"hermes plugins install {name}"
     return f"hermes -p {profile} plugins install {name}"
+
+
+def _enable_command(name: str, home: Path) -> str:
+    from hermes_cli.profiles import get_active_profile
+    from hermes_constants import profile_name_for_home
+    profile = profile_name_for_home(home)
+    if profile is None or (profile == "default" and get_active_profile() == "default"):
+        return f"hermes plugins enable {name}"
+    return f"hermes -p {profile} plugins enable {name}"
 
 
 def _install_pending(home: Path, name: str, *, install: Callable[[str], dict],
@@ -296,6 +317,11 @@ def recover_at_startup(name: str, *, say: Optional[Callable[[str], None]] = None
                 say(message)
             except Exception:
                 logger.debug("Memory migration notification failed", exc_info=True)
+
+    if provider_disabled(name, home):
+        report(f"⚠ Memory provider '{name}' is installed but disabled, so external memory is off for this session. "
+               f"Run `{_enable_command(name, home)}`.")
+        return False
 
     from pm.install import lazy_installs_allowed
     if not lazy_installs_allowed():
