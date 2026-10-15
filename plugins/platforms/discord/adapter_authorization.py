@@ -4,14 +4,19 @@ import asyncio
 
 class DiscordAuthorizationMixin:
     async def reauthorize_native_roles(self, source):
-        from plugins.platforms.discord.adapter import _read_dm_role_auth_guild, _scoped_gate_env
-        from hermes_cli.config import read_raw_config
+        from plugins.platforms.discord.adapter import _read_dm_role_auth_guild
         from discord import HTTPException
 
-        # Unlike ingress caches, recovery reads current transport-scoped policy.
+        # Unlike ingress caches, recovery reads current transport-scoped policy — through the
+        # adapter's own gate resolver, the one `_get_allowed_roles` uses: the scoped env /
+        # connect-time snapshot first, then `PlatformConfig.extra`, which carries every spelling of
+        # the YAML gate (`platforms.discord.allowed_roles` promoted by `PlatformConfig.from_dict`,
+        # an explicit `platforms.discord.extra.allowed_roles`, and the legacy top-level `discord:`
+        # block seeded by `_apply_yaml_config`). Reading the raw config here instead resolved only
+        # the legacy spelling, so a profile configured under `platforms:` admitted the member at
+        # ingress and then dropped the same message with `permission_denied`.
         def policy():
-            cfg = (read_raw_config() or {}).get('discord', {}) or {}
-            raw = _scoped_gate_env('DISCORD_ALLOWED_ROLES') or cfg.get('allowed_roles', [])
+            raw = self._gate_raw('allowed_roles', 'DISCORD_ALLOWED_ROLES')
             roles = {int(str(item).strip()) for item in self._gate_csv_set(raw)
                      if str(item).strip().isdigit()}
             guild_id = _read_dm_role_auth_guild() if source.chat_type == 'dm' else source.scope_id
