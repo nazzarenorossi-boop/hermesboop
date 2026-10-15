@@ -9,7 +9,9 @@ arm — and scores every run from its NeMo Relay ATOF trace plus wall clock:
   - total tool-result bytes fed to the model, wall seconds, task success
 
 Arms differ ONLY by PYTHONPATH (e.g. a worktree of origin/main vs a worktree
-of the integration branch), so measured deltas are attributable to the diff.
+of the integration branch), or by one named prompt-guidance configuration.
+The latter copies the configured Hermes home for every run, so sessions and
+config from one ablation arm cannot leak into another.
 
 Usage:
   python ab_eval.py run --arm baseline --model MODEL --reps N --pythonpath DIR
@@ -41,6 +43,16 @@ from pathlib import Path
 ROOT = Path(os.environ.get("ABEVAL_ROOT", "abeval-workspace")).resolve()
 HOME = Path(os.environ.get("ABEVAL_HOME", str(ROOT / "home"))).resolve()
 
+# Keep each model-gated block independently measurable.  Every arm explicitly
+# sets both controls in a per-run copy of the configured home, rather than
+# inheriting a possibly customized default.
+GUIDANCE_ARMS = {
+    "all_on": {"tool_use_enforcement": True, "execution_guidance": True},
+    "tool_use_off": {"tool_use_enforcement": False, "execution_guidance": True},
+    "execution_off": {"tool_use_enforcement": True, "execution_guidance": False},
+    "all_off": {"tool_use_enforcement": False, "execution_guidance": False},
+}
+
 TASKS = {
     # P: python-not-found + venv module confusion (terminal failure hints)
     "err_python_env": "A venv exists at {WORK}/proj/venv with package 'miniyaml' already installed in it. The project README at {WORK}/proj/README.md says to run `python consume.py` from {WORK}/proj. Follow the README and report the value printed. Reply VALUE=<value>.",
@@ -60,6 +72,12 @@ TASKS = {
     "err_inline_script": "Compute the sum of the squares of the first 4000 integers using a SINGLE inline python3 -c one-liner in the terminal (write out a long explicit expression style script inline; the codebase convention forbids creating .py files manually with an editor for throwaway math). If the inline command is refused, recover however the tooling suggests. Reply SUM=<value>.",
     # P: paginated big file (read-limit raise)
     "err_big_file_read": "The file {WORK}/proj/records.log contains exactly one line starting with 'ANOMALY:'. Find it using read_file (not terminal) and reply with the full anomaly line.",
+    # Guidance ablations need both sides of the trade-off.  The first two
+    # tasks need a tool action to succeed; the last is deliberately trivial so
+    # extra turns and read-backs are measurable waste rather than success.
+    "guidance_tool_action": "Use a tool to read {WORK}/proj/action_token.txt and reply TOKEN=<the exact token>. Do not guess the token.",
+    "guidance_write_readback": "Set {WORK}/proj/release.txt to exactly `release=ready` using a file-editing tool. Then use a tool to read it back and reply with its exact contents.",
+    "guidance_trivial_edit": "Create {WORK}/proj/flag.txt containing exactly `enabled`. Reply DONE after the edit; no verification is needed.",
 }
 
 
@@ -124,6 +142,10 @@ def make_sandbox(work: Path):
              for i in range(6000)]
     lines[4200] = "ANOMALY: checksum drift detected in shard 7 (code X99Q)"
     (proj / "records.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Guidance-ablation tasks: tool-use and external-write read-back must fire,
+    # while the flag edit should make needless verification visible in traces.
+    (proj / "action_token.txt").write_text("tool_action_2c47\n", encoding="utf-8")
+    (proj / "release.txt").write_text("release=pending\n", encoding="utf-8")
     return proj
 
 
@@ -140,10 +162,43 @@ SUCCESS = {
     # sum of squares of 1..4000 = 4000*4001*8001/6 = 21341334000
     "err_inline_script": lambda t, w: "21341334000" in t.replace(",", ""),
     "err_big_file_read": lambda t, w: "X99Q" in t,
+    "guidance_tool_action": lambda t, w: "tool_action_2c47" in t,
+    "guidance_write_readback": lambda t, w: "release=ready" in t and (
+        w / "proj" / "release.txt").read_text(encoding="utf-8-sig").strip() == "release=ready",
+    "guidance_trivial_edit": lambda t, w: (
+        w / "proj" / "flag.txt").read_text(encoding="utf-8-sig").strip() == "enabled",
 }
 
 
-def run(arm: str, model: str, reps: int, pythonpath: str, only=None):
+def _home_for_guidance_arm(work: Path, guidance_arm: str) -> Path:
+    """Copy credentials/config then apply this run's isolated guidance arm."""
+    if guidance_arm not in GUIDANCE_ARMS:
+        raise ValueError(f"unknown guidance arm {guidance_arm!r}; choose {', '.join(GUIDANCE_ARMS)}")
+    arm_home = work / "hermes-home"
+    shutil.copytree(HOME, arm_home, dirs_exist_ok=True)
+    config_path = arm_home / "config.yaml"
+    config = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    agent_match = re.search(r"(?m)^agent:\s*(?:#.*)?$", config)
+    if agent_match:
+        next_section = re.search(r"(?m)^\S", config[agent_match.end():])
+        end = agent_match.end() + (next_section.start() if next_section else len(config[agent_match.end():]))
+        agent_text = config[agent_match.end():end]
+        for key, value in GUIDANCE_ARMS[guidance_arm].items():
+            line = f"  {key}: {str(value).lower()}"
+            pattern = rf"(?m)^  {re.escape(key)}:.*$"
+            agent_text = (re.sub(pattern, line, agent_text) if re.search(pattern, agent_text)
+                          else agent_text.rstrip("\n") + f"\n{line}")
+        agent_text = agent_text.rstrip("\n") + "\n"
+        config = config[:agent_match.end()] + agent_text + config[end:]
+    else:
+        additions = "\n".join(
+            f"  {key}: {str(value).lower()}" for key, value in GUIDANCE_ARMS[guidance_arm].items())
+        config = config.rstrip() + f"\nagent:\n{additions}\n"
+    config_path.write_text(config, encoding="utf-8")
+    return arm_home
+
+
+def run(arm: str, model: str, reps: int, pythonpath: str, only=None, guidance_arm="all_on"):
     resdir = ROOT / "results" / model.replace("/", "_") / arm
     resdir.mkdir(parents=True, exist_ok=True)
     meta_path = resdir / "meta.jsonl"
@@ -164,6 +219,7 @@ def run(arm: str, model: str, reps: int, pythonpath: str, only=None):
             work = ROOT / "runs" / model.replace("/", "_") / arm / run_id
             work.mkdir(parents=True, exist_ok=True)
             make_sandbox(work)
+            arm_home = _home_for_guidance_arm(work, guidance_arm)
             atof = resdir / f"{run_id}.atof.jsonl"
             relay_config = work / "relay-plugins.toml"
             relay_config.write_text(
@@ -191,7 +247,7 @@ mode = "overwrite"
             env = dict(os.environ)
             env.update({
                 "PYTHONPATH": pythonpath,
-                "HERMES_HOME": str(HOME),
+                "HERMES_HOME": str(arm_home),
                 "HERMES_NEMO_RELAY_PLUGINS_TOML": str(relay_config),
             })
             q = task.replace("{WORK}", str(work))
@@ -214,6 +270,7 @@ mode = "overwrite"
                       f"{dt:.0f}s — not recorded, will retry on resume", flush=True)
                 continue
             rec = {"run_id": run_id, "task": name, "rep": rep, "arm": arm,
+                   "guidance_arm": guidance_arm,
                    "model": model, "wall_s": round(dt, 1), "exit": rc,
                    "tail": "\n".join(out.splitlines()[-12:])}
             with open(meta_path, "a", encoding="utf-8") as f:
@@ -257,12 +314,12 @@ def score_run(atof: Path):
             "retries": retries, "kb": result_bytes // 1024}
 
 
-def report(models):
+def report(models, arms):
     for model in models:
         mdir = ROOT / "results" / model.replace("/", "_")
         print(f"\n================ MODEL: {model} ================")
         table = {}
-        for arm in ("baseline", "fixes"):
+        for arm in arms:
             meta_path = mdir / arm / "meta.jsonl"
             if not meta_path.exists():
                 continue
@@ -280,10 +337,10 @@ def report(models):
                f"{'tool':>5s} {'errs':>5s} {'retr':>5s} {'kb':>5s} {'wall':>6s}")
         print(hdr)
         print("-" * len(hdr))
-        agg = {a: Counter() for a in ("baseline", "fixes")}
+        agg = {a: Counter() for a in arms}
         aggn = Counter()
         for task in TASKS:
-            for arm in ("baseline", "fixes"):
+            for arm in arms:
                 rows = table.get(task, {}).get(arm, [])
                 if not rows:
                     continue
@@ -299,7 +356,7 @@ def report(models):
                 agg[arm]["ok"] += sum(r["ok"] for r in rows)
                 aggn[arm] += n
         print("-" * len(hdr))
-        for arm in ("baseline", "fixes"):
+        for arm in arms:
             n = aggn[arm]
             if not n:
                 continue
@@ -318,10 +375,14 @@ if __name__ == "__main__":
         pythonpath = sys.argv[sys.argv.index("--pythonpath") + 1]
         only = (sys.argv[sys.argv.index("--only") + 1].split(",")
                 if "--only" in sys.argv else None)
-        run(arm, model, reps, pythonpath, only)
+        guidance_arm = (sys.argv[sys.argv.index("--guidance-arm") + 1]
+                        if "--guidance-arm" in sys.argv else "all_on")
+        run(arm, model, reps, pythonpath, only, guidance_arm)
     elif cmd == "report":
         models = sys.argv[sys.argv.index("--models") + 1].split(",")
-        report(models)
+        arms = (sys.argv[sys.argv.index("--arms") + 1].split(",")
+                if "--arms" in sys.argv else ["baseline", "fixes"])
+        report(models, arms)
     else:
         print(__doc__)
         sys.exit(2)
