@@ -244,7 +244,10 @@ def _install_telegram_mock(monkeypatch, bot):
     # MessageEntity needed by #27865 mention-detection path; tests don't
     # inspect it but the import must succeed.
     _MessageEntity = lambda **_kw: SimpleNamespace(**_kw)
-    telegram_mod = SimpleNamespace(Bot=lambda token: bot, MessageEntity=_MessageEntity, constants=constants_mod)
+    telegram_mod = SimpleNamespace(
+        Bot=lambda token: bot, MessageEntity=_MessageEntity, constants=constants_mod,
+        InputFile=lambda obj, filename=None, attach=False: SimpleNamespace(filename=filename, attach=attach),
+        InputMediaPhoto=lambda media: SimpleNamespace(media=media))
     monkeypatch.setitem(sys.modules, "telegram", telegram_mod)
     monkeypatch.setitem(sys.modules, "telegram.constants", constants_mod)
 
@@ -451,6 +454,74 @@ class TestSendTelegramMediaDelivery:
         bot.send_message.assert_not_awaited()
         bot.send_photo.assert_awaited_once()
         assert bot.send_photo.await_args.kwargs.get("caption") == "Hello there"
+
+    @pytest.mark.parametrize("count, groups, singles, refused", [(2, [2], 0, False), (11, [10], 1, False), (12, [10], 12, True)])
+    def test_standalone_photos_go_as_albums_of_two_to_ten(self, tmp_path, monkeypatch, count, groups, singles, refused):
+        """One sendMediaGroup instead of a sendPhoto per image. It takes 2-10 items, so a lone
+        remainder goes out as a single photo."""
+        paths = [tmp_path / f"photo-{index}.png" for index in range(count)]
+        for path in paths:
+            path.write_bytes(b"image")
+        bot = MagicMock()
+        order = []
+        async def photo(**kw):
+            order.append(os.path.basename(kw["photo"].name))
+            return SimpleNamespace(message_id=99)
+        async def album(**kw):
+            if refused and bot.send_media_group.await_count == 1:
+                raise type("BadRequest", (Exception,), {})("PHOTO_INVALID_DIMENSIONS")
+            order.extend(item.media.filename for item in kw["media"])
+            return [SimpleNamespace(message_id=index, media_group_id="group-a") for index in range(len(kw["media"]))]
+        bot.send_photo = AsyncMock(side_effect=photo)
+        bot.send_media_group = AsyncMock(side_effect=album)
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram("token", "12345", "", media_files=[(str(p), False) for p in paths]))
+
+        assert result["success"] is True
+        sent = [call.kwargs["media"] for call in bot.send_media_group.await_args_list]
+        assert [len(media) for media in sent] == groups and bot.send_photo.await_count == singles
+        assert [item.media.filename for item in sent[0]] == [p.name for p in paths[:10]]
+        assert order == [p.name for p in paths]
+
+    @pytest.mark.parametrize("error_name, singles", [("BadRequest", 2), ("TimedOut", 0)])
+    def test_failed_album_after_delivered_text_is_a_warning(self, tmp_path, monkeypatch, error_name, singles):
+        """A 400 means Telegram sent none of the group, so its photos go one by one. Any other
+        failure is ambiguous and is not retried. The text already arrived either way: success."""
+        error_cls = type(error_name, (Exception,), {})
+        paths = [tmp_path / f"photo-{index}.png" for index in range(2)]
+        for path in paths:
+            path.write_bytes(b"image")
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        bot.send_photo = AsyncMock(side_effect=[error_cls("PHOTO_INVALID_DIMENSIONS"), SimpleNamespace(message_id=3)])
+        bot.send_media_group = AsyncMock(side_effect=error_cls("PHOTO_INVALID_DIMENSIONS"))
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram(
+            "token", "12345", "weekly report", media_files=[(str(p), False) for p in paths]))
+
+        assert result["success"] is True and len(result["warnings"]) == 1
+        assert bot.send_photo.await_count == singles
+
+    @pytest.mark.parametrize("extra, force_document", [(("notes.pdf",), False), ((), True)])
+    def test_mixed_and_force_document_batches_skip_the_album(self, tmp_path, monkeypatch, extra, force_document):
+        """An album carries photos only. A mixed batch must not lose its other file, and a
+        force-document send must not be recompressed: both stay on the per-file path."""
+        paths = [tmp_path / name for name in ("a.png", "b.jpg", *extra)]
+        for path in paths:
+            path.write_bytes(b"x")
+        bot = MagicMock()
+        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        bot.send_document = AsyncMock(return_value=SimpleNamespace(message_id=2))
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram(
+            "token", "12345", "", media_files=[(str(p), False) for p in paths], force_document=force_document))
+
+        assert result["success"] is True and not bot.send_media_group.called
+        assert bot.send_document.await_count == (2 if force_document else 1)
+        assert bot.send_photo.await_count + bot.send_document.await_count == len(paths)
 
     def test_sends_voice_for_ogg_with_voice_directive(self, tmp_path, monkeypatch):
         voice_path = tmp_path / "voice.ogg"

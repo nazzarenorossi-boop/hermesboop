@@ -25,6 +25,8 @@ def _install_telegram_mock(monkeypatch: pytest.MonkeyPatch, bot_factory: MagicMo
     _MessageEntity = lambda **_kw: SimpleNamespace(**_kw)
     telegram_mod = SimpleNamespace(
         Bot=bot_factory,
+        InputFile=lambda obj, filename=None, attach=False: SimpleNamespace(filename=filename),
+        InputMediaPhoto=lambda media: SimpleNamespace(media=media),
         MessageEntity=_MessageEntity,
         constants=constants_mod,
     )
@@ -90,6 +92,8 @@ def test_multi_file_keeps_separate_text(monkeypatch: pytest.MonkeyPatch) -> None
     _no_proxy(monkeypatch)
     bot = _make_bot()
     _install_telegram_mock(monkeypatch, MagicMock(return_value=bot))
+    bot.send_media_group = AsyncMock(return_value=[
+        SimpleNamespace(message_id=index, media_group_id="group-1") for index in (10, 11)])
     img = _tmpfile(".png")
     img2 = _tmpfile(".jpg")
     try:
@@ -99,9 +103,10 @@ def test_multi_file_keeps_separate_text(monkeypatch: pytest.MonkeyPatch) -> None
         assert res["success"] is True
         # Ambiguous caption→file association: text stays a separate message.
         bot.send_message.assert_awaited()
-        assert bot.send_photo.await_count == 2
-        for call in bot.send_photo.await_args_list:
-            assert not call.kwargs.get("caption")
+        # One native album, not two sendPhoto calls, and nothing rides the album call.
+        bot.send_media_group.assert_awaited_once()
+        bot.send_photo.assert_not_awaited()
+        assert "caption" not in bot.send_media_group.await_args.kwargs
     finally:
         os.unlink(img)
         os.unlink(img2)
