@@ -443,6 +443,52 @@ class TestStatusEndpointTopology:
         assert data["components"]["platforms"]["configured"] == 2
         assert data["components"]["platforms"]["connected"] == 2
 
+    def test_profile_scoped_status_uses_multiplexer_runtime_after_pid_liveness(self, monkeypatch, tmp_path):
+        # A retired standalone gateway can leave a stopped state file behind while its lock is
+        # held by the live multiplexer. The PID rung establishes liveness first, so status must
+        # still resolve the served profile's record rather than project that stale platform map.
+        from contextlib import nullcontext
+
+        from gateway.status import GatewayLiveness
+        import hermes_cli.web_routers.status as status_router
+        from hermes_cli import web_server_profiles
+
+        profile = tmp_path / "profiles" / "coder"
+        profile.mkdir(parents=True)
+        stale_runtime = {
+            "gateway_state": "stopped",
+            "platforms": {"telegram": {"state": "disconnected"}},
+        }
+        multiplex_runtime = {
+            "gateway_state": "running",
+            "served_profiles": ["default", "coder"],
+            "platforms": {"coder:telegram": {"state": "connected"}},
+        }
+        monkeypatch.setattr(web_server_profiles, "_resolve_profile_dir", lambda name: profile)
+        monkeypatch.setattr(web_server_profiles, "_config_profile_scope", lambda profile: nullcontext())
+        monkeypatch.setattr(status_router, "read_runtime_status", lambda path=None: stale_runtime)
+        monkeypatch.setattr(
+            status_router, "resolve_gateway_liveness",
+            lambda **kwargs: GatewayLiveness(running=True, pid=4242, source="pid"),
+        )
+        monkeypatch.setattr(
+            status_router, "multiplexer_liveness_for_profile",
+            lambda home: (4242, multiplex_runtime),
+        )
+        monkeypatch.setattr(
+            _web_server_gateway,
+            "_load_configured_gateway_platforms",
+            lambda: {"telegram"},
+        )
+
+        resp = self.client.get("/api/status", params={"profile": "coder"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_platforms"]["telegram"]["state"] == "connected"
+        assert data["gateway_state"] == "running"
+        assert data["gateway_shared_with"] == ["default", "coder"]
+
     def test_status_rejects_malformed_namespaced_platform_key(self, monkeypatch):
         monkeypatch.setattr(_gw_status, "get_running_pid_cached", lambda: 123)
         monkeypatch.setattr(
