@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import hermes_yaml as yaml
 
-from agent import model_metadata_http
+from agent import model_metadata_http, model_metadata_llamacpp
 
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, base_url_hostname
 
@@ -715,7 +715,7 @@ def _localhost_to_ipv4(url: str) -> str:
 
 
 def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
-    """Probe known endpoints: "ollama", "lm-studio", "vllm", "llamacpp", or None (TTL-cached)."""
+    """Probe known endpoints: "ollama", "lm-studio", "vllm", "llamacpp", "llama-swap", or None (TTL-cached)."""
     import httpx
     # IPv4-resolve BEFORE deriving server/LM Studio URLs and the cache lookup, so localhost and 127.0.0.1 share a cache entry.
     normalized = _localhost_to_ipv4(_normalize_base_url(base_url))
@@ -744,6 +744,10 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
         ("lm-studio", (f"{lmstudio_url}/api/v1/models",), lambda r: True),
         ("ollama", (f"{server_url}/api/tags",), lambda r: "models" in r.json()),
         ("llamacpp", (f"{server_url}/v1/props", f"{server_url}/props"), lambda r: "default_generation_settings" in r.text),
+        # llama-swap serves /props only per model, so the llamacpp leg never matches it. Detect it via its
+        # management route /running (200 with {"running": [...]}; bare llama-server 404s). Never detect through
+        # a model-scoped route: those start the named model.
+        ("llama-swap", (f"{server_url}/running",), lambda r: "running" in r.json()),
         ("vllm", (f"{server_url}/version",), lambda r: "version" in r.json()),
     )
     result: Optional[str] = None
@@ -1584,23 +1588,6 @@ def _lmstudio_context(client, lmstudio_url: str, model: str) -> Optional[int]:
     return None
 
 
-def _llamacpp_context(client, server_url: str, model: str) -> Optional[int]:
-    """llama.cpp /props: the RUNTIME n_ctx, answered by the router even for a not-yet-loaded model
-    (while /v1/models has meta=null), so a lazily-loaded model doesn't fall to a family catch-all."""
-    import httpx
-    for props_path in (f"/props?model={model}", "/props"):
-        try:
-            resp = client.get(f"{server_url}{props_path}")
-        except httpx.HTTPError:
-            return None
-        if resp.status_code != 200:
-            continue
-        n_ctx = _positive_int((resp.json().get("default_generation_settings") or {}).get("n_ctx"))
-        if n_ctx is not None:
-            return n_ctx
-    return None
-
-
 def _openai_models_list_context(client, server_url: str, model: str) -> Optional[int]:
     """/v1/models list: match by id, else the sole model on single-model servers (llama.cpp reports a GGUF path as id)."""
     resp = client.get(f"{server_url}/v1/models")
@@ -1651,9 +1638,13 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
     typed = {
         "ollama": _ollama_ctx,
         "lm-studio": lambda client: _lmstudio_context(client, lmstudio_url, model),
-        "llamacpp": lambda client: _llamacpp_context(client, server_url, model),
+        "llamacpp": lambda client: model_metadata_llamacpp._llamacpp_context(client, server_url, model),
     }.get(server_type)
-    probes = ([typed] if typed else []) + [_model_detail_ctx, lambda client: _openai_models_list_context(client, server_url, model)]
+    if server_type == "llama-swap":
+        # The /v1/models/{model} leg is model-scoped too and would start the model; only the resident-gated probe runs.
+        probes = [lambda client: model_metadata_llamacpp._llamaswap_context(client, server_url, model)]
+    else:
+        probes = ([typed] if typed else []) + [_model_detail_ctx, lambda client: _openai_models_list_context(client, server_url, model)]
     try:
         with httpx.Client(timeout=3.0, headers=_auth_headers(api_key), verify=model_metadata_http.resolve_verify(base_url)) as client:
             return next((ctx for ctx in (probe(client) for probe in probes) if ctx is not None), None)
