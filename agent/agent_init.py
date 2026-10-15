@@ -2324,6 +2324,8 @@ _USAGE_STATE: dict[str, Any] = {
     # Status-bar latency/velocity history (last 10 calls), shared by loop + codex_runtime.
     "_api_latency_history": lambda: deque(maxlen=10),
     "_api_output_history": lambda: deque(maxlen=10),
+    # Per-attempt decode seconds, initialized to None.
+    "_last_api_decode_seconds": None,
 }
 
 # Constructor params stored verbatim under the same name.
