@@ -9,7 +9,7 @@ import uuid
 
 from gateway.config import Platform
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL, Principal, SessionRef, Submission
-from hermes_state_runtime import RuntimeStoreError
+from hermes_state_runtime import RuntimeStoreError, log_invalid_params, published_fields, refusal_clause
 
 
 # ``session.detach end_reason``: a short snake_case label, stored verbatim as ``sessions.end_reason``.
@@ -28,6 +28,16 @@ def display_projection(history, profile_home):
     from tui_gateway import server
     rows = [{**row, '_row_id': row['row_id']} if 'row_id' in row else row for row in history]
     return server._history_to_messages(rows, profile_home=profile_home)
+
+
+def _runtime_error(rid, exc):
+    """JSON-RPC error for a store refusal. ``message`` stays the reason code; a named
+    clause rides in ``data.detail`` and is never a value."""
+    data = {'reason': exc.reason}
+    if getattr(exc, 'detail', None):
+        data['detail'] = exc.detail
+    return {'jsonrpc': '2.0', 'id': rid, 'error': {
+        'code': 4001, 'message': exc.reason, 'data': data}}
 
 
 class AuthorityConnection:
@@ -156,8 +166,7 @@ class AuthorityConnection:
             try:
                 routed = self._sibling_for(profile)
             except RuntimeStoreError as exc:
-                return {'jsonrpc': '2.0', 'id': rid, 'error': {
-                    'code': 4001, 'message': exc.reason, 'data': {'reason': exc.reason}}}
+                return _runtime_error(rid, exc)
             if routed is not None:
                 return await routed.dispatch(request)
             # Our own home: the scope is implicit for the strict session verbs, which refuse
@@ -171,9 +180,15 @@ class AuthorityConnection:
         contract = CANONICAL_METHODS.get(method)
         if contract is not None and (problems := canonical_param_problems(contract, params)):
             # The declared wire contract (``tui_gateway/contracts/canonical.py``) is the closed
-            # key set: an unknown or missing key never reaches the handler.
+            # key set: an unknown or missing key never reaches the handler. ``fields`` and
+            # ``detail`` are the same sanitized clause, never the raw key.
+            verb = method if isinstance(method, str) else None
+            detail = refusal_clause(problems, method=verb)
+            log_invalid_params(detail)
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
-                'code': 4001, 'message': 'invalid_params', 'data': {'reason': 'invalid_params', 'fields': problems}}}
+                'code': 4001, 'message': 'invalid_params',
+                'data': {'reason': 'invalid_params', 'fields': published_fields(problems, method=verb),
+                         'detail': detail}}}
         original_params = dict(params)
         contract = contract or METHODS.get(method)
         handlers = self.handlers()
@@ -199,8 +214,7 @@ class AuthorityConnection:
             check_result(contract, result)
             return {'jsonrpc': '2.0', 'id': rid, 'result': result}
         except RuntimeStoreError as exc:
-            return {'jsonrpc': '2.0', 'id': rid, 'error': {
-                'code': 4001, 'message': exc.reason, 'data': {'reason': exc.reason}}}
+            return _runtime_error(rid, exc)
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
@@ -304,7 +318,7 @@ class AuthorityConnection:
         # the frozen request: the policy re-reads the profile's current route every turn.
         hidden = params.pop('hidden', False)
         if type(hidden) is not bool:
-            raise RuntimeStoreError('invalid_params')
+            raise RuntimeStoreError('invalid_params', detail='hidden')
         ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
         if not ref:
             skills_prompt = None

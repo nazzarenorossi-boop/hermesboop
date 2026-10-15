@@ -47,6 +47,31 @@ class GatewayRPCError(GatewayClientError):
         self.data = data or {}
 
 
+def refusal_display(exc) -> str:
+    """Text a person sees for an owner refusal.
+
+    ``str(exc)`` stays the bare reason code so callers that branch on it keep
+    working. A named ``invalid_params`` clause is appended:
+    ``invalid_params (toolsets)``.
+    """
+    reason = str(exc)
+    data = getattr(exc, "data", None)
+    if reason != "invalid_params" or not isinstance(data, dict):
+        return reason
+    from hermes_state_runtime import is_published_clause, refusal_clause
+    detail = data.get("detail")
+    fields = data.get("fields")
+    if isinstance(detail, str) and is_published_clause(detail):
+        clause = detail
+    elif isinstance(fields, list) and fields:
+        clause = refusal_clause(fields)
+    elif isinstance(detail, str) and detail:
+        clause = refusal_clause([detail])
+    else:
+        return reason
+    return f"{reason} ({clause})"
+
+
 def _bounded_reason(value):
     return value if isinstance(value, str) and value.replace("_", "").isalnum() and len(value) <= 80 else None
 

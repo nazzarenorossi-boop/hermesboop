@@ -4,6 +4,8 @@ No execution, transport, or authority objects live here. Every mutation uses the
 SessionDB transaction owner, including its inode guard and SQLite retry policy.
 """
 import json
+import logging
+import re
 import uuid
 
 from agent.conversation_compression_archive import ABSORBED_ROW_IDS
@@ -13,10 +15,186 @@ from agent.message_metadata import (
 from hermes_state_keys import admission_fingerprint
 
 
+# A client field is echoed only when every dot-separated segment is a short
+# identifier or a list index. Whether a loc is a secret is the log formatter's
+# redactor (``redact_sensitive_text(..., force=True)``), not a second prefix
+# list. ``_SEGMENT``'s only separator is ``_`` (digits cannot lead), and the
+# redactor's lookbehind and lookahead both count ``_`` as part of a token, so
+# a token with ``_`` on either side is invisible to it in place. Several
+# bodies do not cross ``.``. A hit on any run of the loc cut at ``_`` or ``.``
+# on both ends (dots removed as well as kept) becomes ``<redacted-key>``.
+# ``gateway.runtime`` is a gateway-log component, so the warning lands in
+# gateway.log.
+_SEGMENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,40}$')
+_INDEX = re.compile(r'^[0-9]{1,6}$')
+_MAX_CLAUSE = 80
+_MAX_LOCS = 16
+_DEV_CLAUSE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z0-9_]{0,40})(?:\.[A-Za-z_][A-Za-z0-9_]{0,40})*'
+    r'\([A-Za-z_][A-Za-z0-9_]{0,40}\)$'
+)
+REDACTED_KEY = '<redacted-key>'
+_refusal_log = logging.getLogger('gateway.runtime')
+
+
+def _redactor_alters(text):
+    """True when the log redactor would mask or rewrite *text*. Fail closed."""
+    try:
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(text, force=True) != text
+    except Exception:  # health: allow BLE001 -- a redactor failure must not echo the loc
+        _refusal_log.exception('invalid_params redactor failed; treating the loc as secret')
+        return True
+
+
+def _secret_probes(text):
+    """Every run of *text* cut at ``_`` or ``.`` on both ends, dots kept and removed.
+
+    The whole text and each dot segment are runs too, and so is every run
+    with its leading or trailing underscores cut off.
+    """
+    cuts = [at for at, char in enumerate(text) if char in '_.']
+    starts = (0, *(at + 1 for at in cuts))
+    ends = (*cuts, len(text))
+    runs = (text[start:end] for start in starts for end in ends if end > start)
+    return list(dict.fromkeys(probe for run in runs for probe in (run, run.replace('.', '')) if probe))
+
+
+def _redactor_hits(text):
+    if not isinstance(text, str) or not text:
+        return False
+    if len(text) > _MAX_CLAUSE:
+        # Never published, so one pass only picks <redacted-key> over the
+        # fallback. The run-by-run probe is quadratic in the length.
+        return _redactor_alters(text)
+    return any(_redactor_alters(probe) for probe in _secret_probes(text))
+
+
+def _segment_shape_ok(part):
+    return bool(_SEGMENT.fullmatch(part) or _INDEX.fullmatch(part))
+
+
+def _path_shape_ok(path):
+    return (isinstance(path, str) and 0 < len(path) <= _MAX_CLAUSE
+            and all(_segment_shape_ok(part) for part in path.split('.')))
+
+
+def _clause_path(path):
+    """A published clause: a safe path, or the same with placeholder segments."""
+    if not isinstance(path, str) or not path or len(path) > _MAX_CLAUSE:
+        return False
+    if not all(part == REDACTED_KEY or _segment_shape_ok(part) for part in path.split('.')):
+        return False
+    return not _redactor_hits(path)
+
+
+def is_published_clause(detail):
+    """True when *detail* may be stored, logged, and shown. One predicate for all three."""
+    if detail == REDACTED_KEY:
+        return True
+    if _clause_path(detail):
+        return True
+    if not isinstance(detail, str) or not _DEV_CLAUSE.fullmatch(detail):
+        return False
+    head, _, inner = detail.rpartition('(')
+    inner = inner[:-1]
+    return _clause_path(head) and bool(_SEGMENT.fullmatch(inner)) and not _redactor_hits(inner)
+
+
+def _method_fallback(method):
+    leaf = method.split('.')[-1] if isinstance(method, str) and '.' in method else (method or 'params')
+    if isinstance(leaf, str) and _SEGMENT.fullmatch(leaf) and not _redactor_hits(leaf):
+        return f'{leaf}.fields'
+    return 'params.fields'
+
+
+def _classify_loc(name):
+    """Published token for one loc, or None when it is neither safe nor a secret."""
+    if not isinstance(name, str) or not name:
+        return None
+    if _redactor_hits(name):
+        return REDACTED_KEY
+    return name if _path_shape_ok(name) else None
+
+
+def _bounded_locs(names):
+    """The locs worth classifying: ``rpc_error`` drops a data list longer than
+    ``_MAX_LOCS``, so the rest share one ``None`` slot (the method fallback)."""
+    names = [names] if isinstance(names, str) else list(names or ())
+    return names if len(names) <= _MAX_LOCS else [*names[:_MAX_LOCS - 1], None]
+
+
+def published_fields(names, *, method=None):
+    """Field paths safe to return on the wire.
+
+    A secret loc is the placeholder. Any other unsafe loc is the method
+    fallback, and it does not replace a sibling that is safe.
+    """
+    out = []
+    fallback = _method_fallback(method)
+    for name in _bounded_locs(names):
+        token = _classify_loc(name)
+        if token is None:
+            token = fallback
+        if token not in out:
+            out.append(token)
+    return out or [fallback]
+
+
+def refusal_clause(names, *, method=None):
+    """One clause for detail, the log, and the CLI.
+
+    Each loc is classified on its own. A secret becomes ``<redacted-key>``
+    and does not replace a sibling safe loc. ``<method>.fields`` is used only
+    when no loc is safe and none is a secret.
+    """
+    tokens = []
+    for name in _bounded_locs(names):
+        token = _classify_loc(name)
+        if token and token not in tokens:
+            tokens.append(token)
+    if not tokens:
+        return _method_fallback(method)
+    if len(tokens) == 1:
+        return tokens[0]
+    joined = '.'.join(tokens)
+    return joined if is_published_clause(joined) else tokens[0]
+
+
+def log_invalid_params(detail):
+    """One warning, and only for a clause ``is_published_clause`` accepts."""
+    if isinstance(detail, str) and is_published_clause(detail):
+        _refusal_log.warning('invalid_params: %s', detail)
+
+
 class RuntimeStoreError(ValueError):
-    def __init__(self, reason: str):
+    """A bounded store refusal.
+
+    ``reason`` and ``str(self)`` stay the wire code (``invalid_params``). ``detail``
+    is an optional clause name (``toolsets``, ``native.provenance_missing(multiplex)``),
+    never a value or a secret. A named clause logs one warning.
+    """
+
+    def __init__(self, reason: str, *, detail: str | None = None):
         self.reason = reason
+        self.detail = detail if isinstance(detail, str) and is_published_clause(detail) else None
         super().__init__(reason)
+        if self.detail:
+            _refusal_log.warning('%s: %s', reason, self.detail)
+
+
+def named_turn_error(exc, empty_detail: str) -> tuple[str, str]:
+    """Messaging copy for a failed turn.
+
+    A named ``invalid_params`` refusal is the clause, not the class name
+    ``RuntimeStoreError``. Anything else keeps the generic type and text.
+    """
+    detail = getattr(exc, 'detail', None)
+    reason = getattr(exc, 'reason', None)
+    if reason == 'invalid_params' and isinstance(detail, str) and detail:
+        return reason, detail
+    text = str(exc)
+    return type(exc).__name__, (text[:300] if text else empty_detail)
 
 
 def _text(value):
