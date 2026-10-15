@@ -666,6 +666,26 @@ class TestGetProcessStartTime:
             p.kill()
             p.wait()
 
+    @pytest.mark.platforms("macos")
+    def test_macos_uses_unadjusted_psutil_birth_time(self, monkeypatch):
+        """A long-lived reader must not inherit psutil's boot-time correction (#138216)."""
+        import psutil
+
+        class NativeProcess:
+            def create_time(self, *, monotonic=False):
+                assert monotonic is True
+                return 123.45
+
+        class Process:
+            _proc = NativeProcess()
+
+            def create_time(self):
+                raise AssertionError("macOS fingerprint must bypass adjusted create_time")
+
+        monkeypatch.setattr(psutil, "Process", lambda pid: Process())
+
+        assert status._get_process_start_time(1234) == 12345
+
 
 class TestTerminatePid:
     @pytest.mark.platforms("windows")

@@ -475,9 +475,10 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     different value and is never mistaken for the original.
 
     On Linux this is field 22 of ``/proc/<pid>/stat`` (start time in clock
-    ticks since boot, an int).  On platforms without ``/proc`` (macOS, Windows)
-    we fall back to ``psutil.Process(pid).create_time()`` — a float epoch
-    timestamp — quantized to an int (centiseconds) for stable equality.
+    ticks since boot, an int). On macOS, psutil's public epoch timestamp can
+    acquire a process-local boot-time correction after import, so use its native
+    monotonic creation time instead. Windows uses the public psutil timestamp.
+    All psutil values are quantized to centiseconds for stable equality.
 
     The two sources are never mixed on a single platform: ``/proc`` always
     succeeds first on Linux, and always fails on macOS/Windows so psutil is
@@ -492,12 +493,16 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         pass
 
-    # No /proc (macOS / Windows): psutil is a hard dependency and exposes a
-    # cross-platform creation time.  Quantize to centiseconds so repeated reads
-    # of the same process compare equal without float-precision fragility.
+    # No /proc: psutil is a hard dependency. macOS's public ``create_time``
+    # adjusts for boot-time changes relative to psutil import; two long-lived
+    # readers can then disagree about one live process. Its native monotonic
+    # form has one host-wide scale and keeps the PID-reuse proof stable.
     try:
         import psutil  # type: ignore
-        return round(psutil.Process(pid).create_time() * 100)
+        process = psutil.Process(pid)
+        if sys.platform == "darwin":
+            return round(process._proc.create_time(monotonic=True) * 100)
+        return round(process.create_time() * 100)
     except Exception:
         return None
 
