@@ -156,12 +156,20 @@ class TestGatewayPidState:
         token = set_hermes_home_override(str(profile_home))
         try:
             status.write_pid_file()
+            (process_home / "gateway_state.json").write_text(
+                json.dumps({"hermes_home": str(profile_home)}), encoding="utf-8"
+            )
+            assert status.write_runtime_status(reload_existing=True, wait_timeout=2.0)
+            status.publish_runtime_status(platform="cfo:telegram", platform_state="connected")
+            assert status.flush_runtime_status(timeout=2.0)
         finally:
             reset_hermes_home_override(token)
 
         # PID file must land in the process-level home, not the profile home.
         assert (process_home / "gateway.pid").exists()
         assert not (profile_home / "gateway.pid").exists()
+        assert not (profile_home / "gateway_state.json").exists()
+        assert status.read_runtime_status()["hermes_home"] == str(process_home.resolve())
 
         payload = json.loads((process_home / "gateway.pid").read_text())
         assert payload["pid"] == os.getpid()
@@ -351,25 +359,79 @@ class TestGatewayRuntimeStatus:
         assert status.read_runtime_status()["platforms"] == {}
 
 
-    def test_write_runtime_status_overwrites_stale_pid_on_restart(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("previous_home", [None, "other-home"], ids=["legacy", "stale-home"])
+    def test_write_runtime_status_overwrites_stale_pid_on_restart(
+        self, tmp_path, monkeypatch, previous_home
+    ):
         """Regression: setdefault() preserved stale PID from previous process (#1631)."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         # Simulate a previous gateway run that left a state file with a stale PID
         state_path = tmp_path / "gateway_state.json"
-        state_path.write_text(json.dumps({
+        previous_record = {
             "pid": 99999,
             "start_time": 1000.0,
             "kind": "hermes-gateway",
             "platforms": {},
             "updated_at": "2025-01-01T00:00:00Z",
-        }))
+        }
+        if previous_home is not None:
+            previous_record["hermes_home"] = str(tmp_path / previous_home)
+        state_path.write_text(json.dumps(previous_record), encoding="utf-8")
 
-        status.write_runtime_status(gateway_state="running")
+        assert status.write_runtime_status(gateway_state="starting", reload_existing=True, wait_timeout=2.0)
 
         payload = status.read_runtime_status()
         assert payload["pid"] == os.getpid(), "PID should be overwritten, not preserved via setdefault"
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
+        assert payload["hermes_home"] == str(tmp_path.resolve())
+        status.publish_runtime_status(gateway_state="running")
+        assert status.flush_runtime_status(timeout=2.0)
+        assert status.read_runtime_status()["hermes_home"] == str(tmp_path.resolve())
+
+
+    @pytest.mark.parametrize("keep_symlink", [False, True], ids=["no-symlink", "symlink"])
+    def test_write_runtime_status_restamps_home_from_previous_writer(
+        self, tmp_path, monkeypatch, keep_symlink
+    ):
+        """Regression for #136909: a reloaded state file names its current writer's home."""
+        old_home = tmp_path / "old-home"
+        new_home = tmp_path / "new-home"
+        old_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(old_home))
+        status.write_runtime_status(gateway_state="running")
+        assert status.flush_runtime_status(timeout=2.0)
+
+        old_home.rename(new_home)
+        if keep_symlink:
+            try:
+                old_home.symlink_to(new_home, target_is_directory=True)
+            except OSError as exc:
+                if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows symlink privilege unavailable; no-symlink case still runs")
+                raise
+        if keep_symlink:
+            # The lexical path is unchanged: refresh an already cached snapshot too.
+            status.publish_runtime_status(gateway_state="running")
+            assert status.flush_runtime_status(timeout=2.0)
+            assert status.read_runtime_status()["hermes_home"] == str(new_home.resolve())
+        # A restart through the compatibility alias must also publish the canonical home.
+        monkeypatch.setenv("HERMES_HOME", str(old_home if keep_symlink else new_home))
+
+        status.write_runtime_status(gateway_state="running", reload_existing=True)
+        assert status.flush_runtime_status(timeout=2.0)
+
+        payload = status.read_runtime_status()
+        assert payload["hermes_home"] == str(new_home.resolve())
+        monkeypatch.setenv("HERMES_HOME", str(new_home))
+        if keep_symlink:
+            old_home.unlink()
+        assert status._pid_record_belongs_to_current_profile(payload)
+        old_home.mkdir()
+        assert status.recorded_gateway_home_conflicts(payload, expected_home=old_home)
+        status.publish_runtime_status(platform="telegram", platform_state="connected")
+        assert status.flush_runtime_status(timeout=2.0)
+        assert status.read_runtime_status()["hermes_home"] == str(new_home.resolve())
 
 
     def test_runtime_status_running_pid_rejects_pid_reused_by_other_profile(self, monkeypatch):
