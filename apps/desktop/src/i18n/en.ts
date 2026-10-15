@@ -4291,7 +4291,14 @@ export const en: Translations = {
       openModelPicker: 'Open model picker',
       modelPinned: 'pinned by you; new chats use this instead of the Settings default',
       modelTitle: (provider, model) => `Model · ${provider}: ${model}`,
-      providerModelTitle: (provider, model) => `${provider} · ${model}`
+      providerModelTitle: (provider, model) => `${provider} · ${model}`,
+      workhorse: {
+        label: 'Subagents',
+        resetModel: 'Inherit parent model and route',
+        resetEffort: 'Inherit parent effort',
+        inherit: 'Parent model',
+        effortInherit: 'Inherit'
+      }
     }
   },
 
