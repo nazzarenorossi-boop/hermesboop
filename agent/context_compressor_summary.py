@@ -35,6 +35,12 @@ class SummaryDispatchMixin:
         is refused, so every later attempt aborts (#123362). Name the main runtime explicitly.
         A stall-fallback ``pinned`` route replaces the whole route: merged over the main runtime, the
         main api_key/base_url would ride into the fallback entry's call (to its host, or instead of it).
+
+        When fallen back, pin provider/model/base_url/api_mode but **not** ``api_key``. A stored
+        OAuth snapshot can be revoked while the main loop still works (#138469); omitting the key
+        lets ``call_llm`` resolve a live credential from the pool / refresh holders. The same snapshot
+        is also stripped from ``main_runtime`` (normalization keeps it, so routing/recovery would still
+        treat it as the session key); only custom endpoints keep it, since they cannot pool-resolve.
         """
         if pinned:
             # Clear first: a keyless pin (local server) resolves its own credential, never the main one.
@@ -47,11 +53,19 @@ class SummaryDispatchMixin:
             return
         if not getattr(self, "_summary_model_fallen_back", False):
             return
+        # Drop any caller-supplied snapshot so a revoked token cannot win over pool resolution (#138469).
+        call_kwargs.pop("api_key", None)
+        runtime = call_kwargs.get("main_runtime")
+        provider = str(self.provider or "").strip().lower()
+        if isinstance(runtime, dict) and "api_key" in runtime and not (
+            provider == "custom" or provider.startswith("custom:")
+        ):
+            # Copy, never mutate: the caller may share this dict with other attempts.
+            call_kwargs["main_runtime"] = {k: v for k, v in runtime.items() if k != "api_key"}
         for key, value in (
             ("provider", self.provider),
             ("model", self.model),
             ("base_url", self.base_url),
-            ("api_key", self.api_key),
             ("api_mode", getattr(self, "api_mode", "")),
         ):
             if value:
