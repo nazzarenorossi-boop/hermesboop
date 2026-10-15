@@ -6,6 +6,7 @@ No existing cron/child/compute consumer is switched until its inventory is cover
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -51,15 +52,20 @@ class WorkerRPC:
         self.endpoint = None
 
     def __call__(self, method, **params):
-        from hermes_cli.gateway_client import _session_ticket, gateway_ws_target
-        from hermes_cli.gateway_runtime_discovery import query_identify
-        from websockets.sync.client import connect
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            pass
-        else:
-            raise WorkerPersistenceError('synchronous_rpc_on_event_loop')
+            return self._call_sync(method, params)
+        # A provider callback may run on an event loop even though this is a separate worker
+        # process. Keep the synchronous websocket client off that loop; the owner-PID fence
+        # remains in _call_sync.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='worker-rpc') as executor:
+            return executor.submit(self._call_sync, method, params).result()
+
+    def _call_sync(self, method, params):
+        from hermes_cli.gateway_client import _session_ticket, gateway_ws_target
+        from hermes_cli.gateway_runtime_discovery import query_identify
+        from websockets.sync.client import connect
         with self.lock:
             # A served secondary has no socket; its multiplexer's descriptor names it.
             from hermes_cli.gateway_runtime import discover_gateway_endpoint
