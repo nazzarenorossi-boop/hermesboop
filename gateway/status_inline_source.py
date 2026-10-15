@@ -153,3 +153,26 @@ def inline_bootstrap_argv(tokens: list[str]) -> list[str] | None:
             if entry is not None:
                 return [tokens[0], *entry]
     return None
+
+
+def spawn_intent_suffix_positions(tokens: list[str], flag_index: int) -> range:
+    """Positions of the spawn-intent suffixes worth handing the canonical matcher.
+
+    ``status.gateway_spawn_intent_subcommand`` peels the ``-c`` wrapper and tries EVERY suffix,
+    each a fresh ``shlex.split`` in the matcher — O(N) suffixes costing O(N) each is O(N²) on a
+    large inline source (#137023). Every suffix the matcher ACCEPTS carries a ``gateway`` token
+    (each accept path: ``gateway/run.py``, ``desktop-gateway.py``, ``hermes-gateway*``, the
+    ``hermes``-gated subcommand scan, and the bootstrap argv rewrite all name ``gateway``), so the
+    walk can stop just past the last one without dropping a match.
+
+    The one exception is the base64 ``_BOOTSTRAPS`` kind, whose gateway argv is encoded: its only
+    producer is the Windows ``.cmd`` launcher, which appends the literal ``gateway run`` via
+    ``%*``, so the suffix carries the token anyway. A future base64-only launcher form has to
+    revisit this boundary.
+    """
+    start = flag_index + 2
+    last = start - 1
+    for i in range(start, len(tokens)):
+        if "gateway" in tokens[i].lower():
+            last = i
+    return range(start, last + 1)
