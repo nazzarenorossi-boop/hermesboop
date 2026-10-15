@@ -179,7 +179,14 @@ export function ChatBar({
   // prompt owns its own dismissal (Skip, Reject, dialog close).
   const awaitingInput = useStore(scope.$awaitingInput)
   const blockingPrompt = useStore(useMemo(() => sessionBlockingPrompt(sessionId ?? null), [sessionId]))
-  const activeQueueSessionKey = queueSessionKey || sessionId || freshDraftKey || null
+
+  // A null queue key from the routed primary view means a confirmed new chat.
+  // Do not fall back to its lagging runtime id: that id can still name the
+  // session just left and would show its queue in this fresh draft (#139190).
+  // Older callers that omit the route-aware key keep the runtime fallback.
+  const activeQueueSessionKey =
+    queueSessionKey === undefined ? sessionId || freshDraftKey || null : queueSessionKey || freshDraftKey || null
+
   const { collapsed: statusDrawerCollapsed, toggle: toggleStatusDrawer } = useStatusDrawer(activeQueueSessionKey)
   const statusDrawerId = useId()
   const codingDrawerId = useId()
