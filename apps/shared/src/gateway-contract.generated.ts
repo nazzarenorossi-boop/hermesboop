@@ -3043,6 +3043,11 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface PromptRetryParams {
+  session_id: string
+  profile?: string | null
+  retry_token: string
+}
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -3168,6 +3173,7 @@ export interface InflightTurn {
   correction_offsets?: number[] | null
   error?: string | null
   status?: string | null
+  retry_token?: string | null
   recoverable?: boolean | null
   error_surface?: Record<string, unknown> | null
 }
@@ -4887,6 +4893,7 @@ export interface CanonicalSnapshot {
   stored_session_id: string
   messages: TranscriptMessage[]
   display_messages?: TranscriptMessage[] | null
+  inflight?: InflightTurn | null
   message_count: number
   running: boolean
   authority_epoch: number
@@ -5197,6 +5204,10 @@ export interface CanonicalBotDeliverResult {
   retry_admission_id?: string | null
   error?: string | null
   reason?: string | null
+}
+export interface CanonicalRetryParams {
+  session_id: string
+  retry_token: string
 }
 /** ``answers`` rides only on a reconnect replay (locks the server already accepted; null = skipped). */
 export interface ClarifyRequestParams {
@@ -5529,6 +5540,7 @@ export interface MessageCompletePayload {
   failure_reason?: string | null
   rendered?: string | null
   error?: string | null
+  retry_token?: string | null
   recoverable?: boolean | null
   error_surface?: ErrorSurface | null
   partial?: boolean | null
@@ -6200,6 +6212,8 @@ export interface RpcMethods {
   'prompt.background': { params: SideAgentParams; result: TaskIdResult }
   /** Side question over a snapshot of the live conversation; the answer arrives as btw.complete. */
   'prompt.btw': { params: SideAgentParams; result: TaskIdResult }
+  /** Continue the exact retained failed provider request; stale checkpoints are refused without a rewind. */
+  'prompt.retry': { params: PromptRetryParams; result: PromptSubmitResult }
   /** Send a user turn to a live session; busy sessions queue / steer / redirect instead of refusing. */
   'prompt.submit': { params: PromptSubmitParams; result: PromptSubmitResult }
   /** Re-read ~/.hermes/.env (CLI /reload parity); built agents keep their pool until /new. */
@@ -6552,6 +6566,7 @@ export const RPC_METHODS = [
   'projects.update',
   'prompt.background',
   'prompt.btw',
+  'prompt.retry',
   'prompt.submit',
   'reload.env',
   'reload.mcp',
@@ -6683,6 +6698,8 @@ export interface CanonicalRpcMethods {
   'prompt.receipt': { params: PromptReceiptParams; result: PromptReceiptResult }
   /** Acknowledge a turn lost across an owner restart; the FIFO behind it resumes. Never requeues the lost input. */
   'prompt.resolve_unknown': { params: PromptResolveUnknownParams; result: AdmissionStatus }
+  /** Continue a proven failed provider request without new user input or rewind. */
+  'prompt.retry': { params: CanonicalRetryParams; result: AdmissionStatus }
   'prompt.submit': { params: CanonicalSubmitParams; result: AdmissionStatus }
   /** The classic CLI's /diff session: everything changed since the session's earliest retained checkpoint, as data for its terminal renderer. */
   'rollback.session_diff': { params: RollbackSessionDiffParams; result: RollbackSessionDiffResult }
@@ -6740,6 +6757,7 @@ export const CANONICAL_RPC_METHODS = [
   'prompt.cancel',
   'prompt.receipt',
   'prompt.resolve_unknown',
+  'prompt.retry',
   'prompt.submit',
   'rollback.session_diff',
   'runtime.describe',

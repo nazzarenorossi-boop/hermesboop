@@ -21,5 +21,9 @@ def check_local_input(authority, ref, row, *, source=None):
         source = source or authority.sessions[ref.session_id].source
         if row['principal_id'] != source.user_id:
             raise RuntimeStoreError('permission_denied')
+    if 'retry_continuation_v1' in payload:
+        from gateway.session_retry import check_retry_input
+        check_retry_input(authority, ref, row)
+        allowed.add('retry_continuation_v1')
     if not {'text'} <= set(payload) <= allowed:
         raise RuntimeStoreError('permission_denied')

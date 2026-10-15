@@ -16,7 +16,7 @@ from hermes_state_runtime import RuntimeStoreError
 _END_REASON = re.compile(r'[a-z][a-z_]{0,31}')
 # Verbs whose param sets are closed and never carried a ``profile`` key.
 _PROFILE_IMPLICIT = frozenset({'session.create', 'session.list', 'session.info', 'session.resume', 'session.detach',
-                               'prompt.submit', 'prompt.receipt', 'prompt.cancel', 'prompt.resolve_unknown',
+                               'prompt.submit', 'prompt.retry', 'prompt.receipt', 'prompt.cancel', 'prompt.resolve_unknown',
                                'session.interrupt', 'session.events.since', 'session.mutate', 'session.stats',
                                'approval.respond', 'clarify.respond'})
 
@@ -134,6 +134,8 @@ class AuthorityConnection:
         handlers['message.react'] = partial(react, self)
         from gateway.session_control_actions import control
         handlers['session.control'] = partial(control, self)
+        from gateway.session_retry import retry
+        handlers['prompt.retry'] = partial(retry, self)
         return handlers
 
     async def dispatch(self, request):
@@ -450,6 +452,7 @@ class AuthorityConnection:
         # reopens it (``reopen_local_session`` in the drain), so opening a finished chat
         # never re-lights DB-derived liveness with no new activity.
         self.authority.authorize(self.actor, ref, 'session:read')
+        from gateway.session_retry import retry_inflight
         snapshot = await self.authority.attach(self.actor, ref)
         self.subscriptions[ref.session_id] = snapshot.subscription_id
         # Only local routes have a frozen local launch policy to project; with it, main's banner and
@@ -462,7 +465,8 @@ class AuthorityConnection:
         if params.get('display_projection'):
             display['display_messages'] = display_projection(snapshot.history, self.authority.profile_id)
         return {'session_id': ref.session_id, 'stored_session_id': ref.session_id,
-                'messages': list(snapshot.history), **display, 'message_count': len(snapshot.history),
+                'messages': list(snapshot.history), **display,
+                'inflight': retry_inflight(self.authority.sessions[ref.session_id], snapshot.pending), 'message_count': len(snapshot.history),
                 'running': snapshot.handle.execution_state == 'running',
                 'authority_epoch': snapshot.handle.authority_epoch,
                 'replay_epoch': snapshot.replay_epoch, 'last_sequence': snapshot.last_sequence,
