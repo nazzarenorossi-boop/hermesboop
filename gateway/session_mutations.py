@@ -151,9 +151,16 @@ async def write_mutation(authority, ref, params, editor_servers, *, principal_id
         # would refuse a session whose receipt the client already saw as terminal.
         if operation == 'delete':
             store = getattr(authority.runner, 'session_store', None)
-            if store is not None and (store._routing_db is None
-                    or store._routing_db.db_path != authority.db.db_path):
-                raise RuntimeStoreError('runtime_coordination_required')
+            if store is not None:
+                # The routing index is deliberately rooted at the launch home while a
+                # multiplexed authority owns its profile's state.db. Its path therefore
+                # cannot establish coordinated ownership. Authority startup registers
+                # the profile DB's current epoch on this shared store instead.
+                from pathlib import Path
+                epochs = getattr(store, '_local_authority_epochs', {})
+                if (store._routing_db is None
+                        or epochs.get(Path(authority.db.db_path).resolve()) != authority.epoch):
+                    raise RuntimeStoreError('runtime_coordination_required')
         if operation in {'rewind', 'reset'} and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
             raise RuntimeStoreError('runtime_coordination_required')
 

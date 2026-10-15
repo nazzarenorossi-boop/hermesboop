@@ -1,4 +1,5 @@
 """Shared mutation publication and live-state coordination."""
+from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 import pytest
@@ -51,5 +52,37 @@ async def test_rewind_refuses_live_task_even_before_admission_claim(tmp_path):
                 'operation': 'rewind', 'payload': {'target_message_id': db.get_messages('s')[0]['id']}}})
             assert response['error']['message'] == 'session_busy'
             assert db.get_messages('s')[0]['content'] == 'keep'
+        finally:
+            await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_uses_secondary_profile_authority_with_shared_routing_store(tmp_path, monkeypatch):
+    """A multiplexed store routes every profile from its launch-home index."""
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+
+    root_home = tmp_path / 'root'
+    secondary_home = root_home / 'profiles' / 'secondary'
+    secondary_home.mkdir(parents=True)
+    monkeypatch.setenv('HERMES_HOME', str(root_home))
+    store = SessionStore(root_home / 'sessions', GatewayConfig(multiplex_profiles=True))
+    with SessionDB(db_path=secondary_home / 'state.db') as db:
+        db.create_session('s', source='test')
+        epoch = rt.begin_runtime_epoch(db, instance_id='secondary-owner')
+        runner = SimpleNamespace(_draining=False, session_store=store)
+        authority = SessionAuthority(runner, profile_id=str(secondary_home), instance_id='secondary-owner',
+                                     db=db, epoch=epoch)
+        authority.sessions['s'] = LiveSession(None, 'route')
+        store._local_authority_epochs = {Path(db.db_path).resolve(): epoch}
+        assert store._routing_db.db_path != db.db_path
+        owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
+        try:
+            response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {
+                'session_id': 's', 'request_id': 'delete-secondary', 'expected_revision': 0,
+                'expected_generation': 0, 'operation': 'delete', 'payload': {}}})
+            assert 'result' in response, response
+            assert response['result']['deleted_ids'] == ['s']
+            assert db.get_session('s') is None
         finally:
             await owner.close()
