@@ -1,10 +1,15 @@
 """Shared bundle operations use real filesystem and entrypoint contracts."""
 from __future__ import annotations
 
+import io
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tarfile
+from pathlib import Path
 
 
 import pytest
@@ -14,6 +19,64 @@ from scripts.build.inputs import project_entries
 from scripts.build.agent import plant_surfaces
 from scripts.build.launchers import posix_launcher
 from scripts.bundles.desktop import release_version
+
+
+def _stub_snapshot_archive(monkeypatch) -> None:
+    """Supply the bytes that ``git archive`` would produce without a live git subprocess."""
+    from scripts.bundles import payload
+
+    def archive(command, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        with tarfile.open(output, "w") as source:
+            member = tarfile.TarInfo("pkg/mod.py")
+            data = b"VALUE = 1\n"
+            member.size = len(data)
+            source.addfile(member, io.BytesIO(data))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(payload.subprocess, "run", archive)
+
+
+def test_snapshot_uses_readonly_aware_cleanup(tmp_path, monkeypatch):
+    """Regression for #137717: repeated payload preparation uses the cleanup helper."""
+    from scripts.bundles import payload
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    destination = tmp_path / "payload"
+    _stub_snapshot_archive(monkeypatch)
+    snapshot(repo, "HEAD", destination)
+    cleanup_calls: list[Path] = []
+
+    def cleanup(path: Path) -> None:
+        cleanup_calls.append(path)
+        shutil.rmtree(path)
+
+    monkeypatch.setattr(payload, "rmtree_readonly", cleanup)
+    snapshot(repo, "HEAD", destination)
+
+    assert cleanup_calls == [destination.resolve()]
+    assert (destination / "pkg" / "mod.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.platforms("windows")
+def test_snapshot_replaces_payload_with_readonly_bytecode_on_windows(tmp_path, monkeypatch):
+    """A second prepare removes pycs sealed read-only by ``bake_bytecode`` (#137717)."""
+    repo = tmp_path / "source"
+    repo.mkdir()
+    destination = tmp_path / "payload"
+    _stub_snapshot_archive(monkeypatch)
+    snapshot(repo, "HEAD", destination)
+    cache = destination / "pkg" / "__pycache__"
+    cache.mkdir()
+    pyc = cache / "mod.cpython-314.pyc"
+    pyc.write_bytes(b"baked")
+    pyc.chmod(stat.S_IREAD)
+
+    snapshot(repo, "HEAD", destination)
+
+    assert destination.exists()
+    assert (destination / "pkg" / "mod.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_release_version_comes_from_the_release_identity_not_the_checkout(tmp_path):
