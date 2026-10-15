@@ -1,0 +1,32 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: pay-cli
+description: Pay per-request for HTTP 402/x402/MPP APIs from a local wallet.
+source: https://github.com/solana-foundation/pay
+
+# Install the local `pay` CLI first; `pay mcp` runs it as a stdio MCP server.
+transport:
+  type: stdio
+  command: pay
+  args: [mcp]
+  # Route confirmations to the owning Hermes session, including headless
+  # gateways that cannot render a platform biometric prompt.
+  env:
+    PAY_FORCE_ELICITATION: "1"
+
+auth:
+  type: none
+
+post_install: |
+  Install the `pay` CLI on PATH:
+    npm install -g @solana/pay
+
+  Then configure a wallet outside of Hermes:
+    pay setup
+
+  Start a new Hermes session so its Pay tools load. Payment confirmations
+  are routed through Hermes rather than a platform biometric prompt.
+  For a headless host, `pay setup --backend file` stores an unencrypted,
+  owner-only keypair file. Use it only if that host is a trusted wallet boundary.
