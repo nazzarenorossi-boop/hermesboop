@@ -1014,6 +1014,15 @@ test('resolveProfileApiRequest uses exact method and path eligibility for mixed 
 
 test('resolveProfileApiRequest scopes complete safe families according to their contracts', () => {
   assert.deepEqual(
+    resolveProfileApiRequest('iris', '/api/chat/image-upload', {
+      requestMethod: 'POST'
+    }),
+    {
+      backendProfile: null,
+      requestPath: '/api/chat/image-upload?profile=iris'
+    }
+  )
+  assert.deepEqual(
     resolveProfileApiRequest('iris', '/api/tools/toolsets/image_gen/config', {
       requestMethod: 'GET'
     }),

@@ -701,6 +701,11 @@ const LOCAL_PRIMARY_SCOPED_ROUTES = new Set([
   'GET /api/portal',
   'GET /api/hermes/update/check',
   'POST /api/local-models/activate',
+  // The chat image upload route resolves its staging directory inside
+  // ``_profile_scope(profile)``. It must share the host backend and carry the
+  // query profile, otherwise a non-default desktop session stages bytes under
+  // the launch profile and prompt admission rejects that foreign path.
+  'POST /api/chat/image-upload',
   'GET /api/dashboard/themes',
   'PUT /api/dashboard/theme',
   'GET /api/dashboard/font',
