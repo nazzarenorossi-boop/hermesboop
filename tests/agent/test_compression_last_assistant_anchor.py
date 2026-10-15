@@ -20,6 +20,7 @@ import pytest
 from agent.context_compressor import SUMMARY_PREFIX
 from agent.conversation_compression_reply_anchor import (
     _ensure_compressed_keeps_last_assistant_reply,
+    _reply_insertion_index,
 )
 import itertools
 
@@ -88,6 +89,39 @@ def _tool_chain(*call_ids):
             {"role": "tool", "content": "ok", "tool_call_id": call_id},
         ]
     return rows
+
+
+def test_later_text_twin_does_not_move_reply_past_tool_followers(caplog):
+    """Regression for #138173: a dropped early text follower must not make the
+    reply cross a later tool round whose ids still locate its original slot."""
+    def tool_call(call_id):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+        }
+
+    def tool_result(call_id):
+        return {"role": "tool", "tool_call_id": call_id, "content": f"result {call_id}"}
+
+    reply = {"role": "assistant", "content": "Starting the work now."}
+    original = [
+        {"role": "user", "content": "start"}, reply, {"role": "user", "content": "continue"},
+        tool_call("call_1"), tool_result("call_1"), {"role": "user", "content": "continue"},
+        tool_call("call_2"), tool_result("call_2"),
+    ]
+    compressed = [
+        {"role": "user", "content": SUMMARY}, tool_call("call_1"), tool_result("call_1"),
+        {"role": "user", "content": "continue"}, tool_call("call_2"), tool_result("call_2"),
+    ]
+
+    assert _reply_insertion_index(original[2:], compressed) == 1
+    with caplog.at_level("WARNING", logger="agent.conversation_compression_reply_anchor"):
+        inserted = _ensure_compressed_keeps_last_assistant_reply(original, compressed)
+
+    assert inserted is None
+    assert any("strict role alternation" in record.getMessage() for record in caplog.records)
+    assert [message["role"] for message in compressed] == ["user", "assistant", "tool", "user", "assistant", "tool"]
 
 
 def _seed(tmp_path, tail_rows, fold, follower):

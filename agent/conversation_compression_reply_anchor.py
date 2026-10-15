@@ -186,10 +186,11 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
 
     ``followers`` are the ORIGINAL rows after the reply (the next user turn, its
     tool rounds, ...). The slot is just before the surviving row that originally
-    followed it: the LAST match in ``compressed`` on role + normalized text
-    (a first-match scan binds to an older identical "ok"/"thanks" twin and
-    resurfaces the reply mid-history; raw ``==`` misses a follower the engine
-    re-rendered from a parts list). When no follower survives but the original
+    followed it. Text rows use the LAST match in ``compressed`` (a first-match
+    scan binds to an older identical "ok"/"thanks" twin and resurfaces the reply
+    mid-history; raw ``==`` misses a follower the engine re-rendered from a
+    parts list), but an unambiguous tool or durable-row identity clamps that
+    tentative slot to its earliest surviving position. When no follower survives but the original
     had a real user turn after the reply, the reply must still never land after
     a trailing REAL user row — that is the turn the loop is about to answer, and
     an ``assistant`` tail would present the old reply as its answer — so it goes
@@ -210,11 +211,23 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
     def _row_ids(message: dict) -> frozenset:
         return _tool_call_ids(message) | frozenset(filter(None, (_tool_result_id(message),)))
 
+    def _stable_row_identity(message: dict) -> tuple[str, int | str] | None:
+        row_id = message.get("_row_id")
+        if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
+            return ("row", row_id)
+        message_uid = message.get("message_uid")
+        if isinstance(message_uid, str) and message_uid:
+            return ("uid", message_uid)
+        return None
+
     followers = [f for f in followers if isinstance(f, dict)]
     ambiguous = False
+    text_match = None
+    earliest_identified_match = None
     for follower in followers:
         follower_role, follower_text = follower.get("role"), _message_text(follower).strip()
         follower_call_ids = _tool_call_ids(follower)
+        follower_identity = _stable_row_identity(follower)
         if _row_ids(follower) & reused_ids:
             ambiguous = ambiguous or any(
                 isinstance(m, dict) and _row_ids(m) & reused_ids for m in compressed
@@ -229,18 +242,33 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
             # such row sits LAST (mid-turn compaction keeps the whole current tool chain).
             # The call ids are unique per round; match on those instead.
             message_call_ids = _tool_call_ids(message)
+            if follower_identity or _stable_row_identity(message):
+                if follower_identity == _stable_row_identity(message):
+                    earliest_identified_match = (
+                        pos if earliest_identified_match is None else min(earliest_identified_match, pos)
+                    )
+                continue
             if follower_call_ids or message_call_ids:
                 if message_call_ids == follower_call_ids:
-                    return pos
+                    earliest_identified_match = (
+                        pos if earliest_identified_match is None else min(earliest_identified_match, pos)
+                    )
                 continue
             if follower_role == "tool" and (_tool_result_id(follower) or _tool_result_id(message)):
                 if _tool_result_id(message) == _tool_result_id(follower):
-                    return pos
+                    earliest_identified_match = (
+                        pos if earliest_identified_match is None else min(earliest_identified_match, pos)
+                    )
                 continue
             if _same_visible_content(message, follower, follower_text):
-                return pos
+                text_match = pos
+                break
     if ambiguous:
         return None
+    if earliest_identified_match is not None:
+        return min(text_match, earliest_identified_match) if text_match is not None else earliest_identified_match
+    if text_match is not None:
+        return text_match
     if (
         followers
         and any(_is_real_user_message(f) for f in followers)
