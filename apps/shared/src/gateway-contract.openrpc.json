@@ -34510,6 +34510,18 @@
           },
           "info": {
             "$ref": "#/components/schemas/SessionLiveInfo"
+          },
+          "running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Running"
           }
         },
         "required": [
@@ -35539,6 +35551,18 @@
           },
           "info": {
             "$ref": "#/components/schemas/SessionLiveInfo"
+          },
+          "running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Running"
           }
         },
         "required": [
