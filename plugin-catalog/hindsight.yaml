@@ -7,6 +7,7 @@ description: "Hindsight long-term memory provider — knowledge graph, entity re
 maintainer: vectorize-io
 tier: community
 category: memory
+featured: true
 requires_hermes: ">=0.21.4"
 docs_url: https://hindsight.vectorize.io/sdks/integrations/hermes
 image: https://raw.githubusercontent.com/vectorize-io/hindsight/f843f173bb41f001e322cc83c917371639e47fbf/hindsight-integrations/hermes/docs/banner.png
