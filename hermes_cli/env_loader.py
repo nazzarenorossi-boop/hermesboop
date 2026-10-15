@@ -197,10 +197,24 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
 
     try:
         from agent.secret_scope import _is_global_env, load_env_file
-        from agent.secret_sources.registry import apply_all
+        from agent.secret_sources.registry import apply_all, list_sources
 
         local_env = {name: value for name, value in os.environ.items() if _is_global_env(name)}
         local_env.update(load_env_file(home / ".env"))
+        # A process-injected bootstrap token is not globally readable: it may only
+        # enter this profile's private source environment when that source is
+        # enabled here.  This keeps it out of unrelated scoped reads and children
+        # while allowing systemd / `op run` credentials to authenticate a cold
+        # profile's configured source.
+        for source in list_sources(scope=str(home)):
+            source_cfg = cfg.get(source.name)
+            source_cfg = source_cfg if isinstance(source_cfg, dict) else {}
+            try:
+                token_env = source.token_env(source_cfg) if source.is_enabled(source_cfg) else ""
+            except Exception:
+                continue
+            if isinstance(token_env, str) and token_env in os.environ:
+                local_env.setdefault(token_env, os.environ[token_env])
         # Mirror load_hermes_dotenv()'s .op.env bootstrap (1Password token lives in gitignored .op.env)
         # or cold profiles fail 1Password hydration. .env wins.
         # Without seeding it here a cold profile configured for the supported .op.env flow fails 1Password
