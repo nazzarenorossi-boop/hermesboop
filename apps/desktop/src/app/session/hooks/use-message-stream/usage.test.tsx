@@ -52,6 +52,37 @@ describe('useMessageStream status-bar usage scoping', () => {
     })
   })
 
+  it('merges the bare session.usage payload published by the unified gateway', () => {
+    mountStream()
+
+    act(() =>
+      stream.handleEvent({
+        payload: { avg_tps: 42.5, cache_hit_pct: 87, context_max: 128000, context_used: 64000, input: 1200, total: 1280 },
+        session_id: SID,
+        type: 'session.usage'
+      })
+    )
+
+    expect($currentUsage.get()).toEqual({
+      ...BASELINE,
+      avg_tps: 42.5,
+      cache_hit_pct: 87,
+      context_max: 128000,
+      context_used: 64000,
+      input: 1200,
+      total: 1280
+    })
+    expect(sessionStates.get(SID)?.usage).toEqual({
+      ...BASELINE,
+      avg_tps: 42.5,
+      cache_hit_pct: 87,
+      context_max: 128000,
+      context_used: 64000,
+      input: 1200,
+      total: 1280
+    })
+  })
+
   it('caches a background session.usage tick without overwriting the primary status bar', () => {
     mountStream()
 
