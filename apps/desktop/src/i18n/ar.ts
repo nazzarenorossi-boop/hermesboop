@@ -35,6 +35,7 @@ export const arOverrides = {
   notifications: arDiagnostics.notifications,
   remoteDisplayBanner: arBoot.remoteDisplayBanner,
   butterbar: arBoot.butterbar,
+  keepAwakeOffer: arBoot.keepAwakeOffer,
   promptNotices: arBoot.promptNotices,
   titlebar: arChrome.titlebar,
   keybinds: arChrome.keybinds,
